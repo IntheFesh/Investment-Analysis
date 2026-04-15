@@ -17,7 +17,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from ..sample_data import combine_holdings, get_user_portfolio, get_return_series_for_portfolio
-from ...data_analysis import compute_max_drawdown
+from data_analysis import compute_max_drawdown
 
 router = APIRouter()
 

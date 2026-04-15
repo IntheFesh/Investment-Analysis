@@ -25,7 +25,7 @@ from ..sample_data import (
     get_user_portfolio,
     get_return_series_for_portfolio,
 )
-from ...data_analysis import compute_max_drawdown, compute_volatility
+from data_analysis import compute_max_drawdown, compute_volatility
 
 router = APIRouter()
 
