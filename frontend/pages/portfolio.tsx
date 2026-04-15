@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import axios from 'axios';
 import Layout from '@/components/Layout';
@@ -28,6 +28,15 @@ interface PortfolioOverview {
   };
 }
 
+interface PortfolioExportPack {
+  formats: {
+    json: unknown;
+    markdown: string;
+    csv: string;
+  };
+  recommendation_prompt: string;
+}
+
 interface PortfolioDiagnosis {
   diagnosis: {
     risk_type: string;
@@ -40,7 +49,7 @@ interface PortfolioDiagnosis {
 }
 
 export default function PortfolioPage() {
-  const [tab, setTab] = useState<'overview' | 'diagnosis'>('overview');
+  const [tab, setTab] = useState<'overview' | 'diagnosis' | 'export'>('overview');
   const portfolioId = 'pf_default';
   // Fetch overview
   const overviewQuery = useQuery(['portfolio-overview', portfolioId], async () => {
@@ -52,6 +61,15 @@ export default function PortfolioPage() {
     const res = await axios.get(`/api/v1/portfolio/${portfolioId}/diagnosis`);
     return res.data.data as PortfolioDiagnosis;
   });
+
+  const exportQuery = useQuery(['portfolio-export-pack', portfolioId], async () => {
+    const res = await axios.get(`/api/v1/portfolio/${portfolioId}/export-pack`);
+    return res.data.data as PortfolioExportPack;
+  });
+  const markdownPreview = useMemo(
+    () => exportQuery.data?.formats.markdown.split('\n').slice(0, 8).join('\n') ?? '',
+    [exportQuery.data]
+  );
   return (
     <Layout>
       <h1 className="text-2xl font-bold mb-4">基金组合</h1>
@@ -67,6 +85,12 @@ export default function PortfolioPage() {
             onClick={() => setTab('diagnosis')}
           >
             组合诊断
+          </button>
+          <button
+            className={`px-3 py-2 text-sm font-medium ${tab === 'export' ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-600 dark:text-gray-400'}`}
+            onClick={() => setTab('export')}
+          >
+            AI 导出
           </button>
       </div>
       {tab === 'overview' && (
@@ -216,6 +240,37 @@ export default function PortfolioPage() {
                     <li key={k}>{k}: {v}</li>
                   ))}
                 </ul>
+              </section>
+            </div>
+          )}
+        </div>
+      )}
+      {tab === 'export' && (
+        <div>
+          {exportQuery.isLoading && <p>加载中…</p>}
+          {exportQuery.error && <p>加载失败，请刷新重试</p>}
+          {exportQuery.data && (
+            <div className="space-y-6">
+              <section className="p-4 border rounded-md bg-white dark:bg-gray-800 shadow-sm">
+                <h2 className="text-xl font-semibold mb-2">导出格式预览</h2>
+                <p className="text-sm mb-2">JSON / Markdown / CSV 已在后端生成预览；PNG 将通过异步导出任务提供。</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <pre className="text-xs overflow-auto p-2 rounded bg-gray-100 dark:bg-gray-900">{JSON.stringify(exportQuery.data.formats.json, null, 2)}</pre>
+                  <pre className="text-xs overflow-auto p-2 rounded bg-gray-100 dark:bg-gray-900">{markdownPreview}</pre>
+                </div>
+                <details className="mt-3">
+                  <summary className="cursor-pointer text-sm font-medium">查看 CSV 预览</summary>
+                  <pre className="text-xs overflow-auto p-2 rounded bg-gray-100 dark:bg-gray-900 mt-2">{exportQuery.data.formats.csv}</pre>
+                </details>
+              </section>
+
+              <section className="p-4 border rounded-md bg-white dark:bg-gray-800 shadow-sm">
+                <h2 className="text-xl font-semibold mb-2">推荐提示词</h2>
+                <textarea
+                  className="w-full h-28 border rounded-md p-2 dark:bg-gray-700 dark:border-gray-600"
+                  value={exportQuery.data.recommendation_prompt}
+                  readOnly
+                />
               </section>
             </div>
           )}

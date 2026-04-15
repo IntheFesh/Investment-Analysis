@@ -24,7 +24,6 @@ import sys
 from datetime import datetime
 from typing import List
 
-import numpy as np
 import pandas as pd
 
 from data_collection import fetch_stock_data
@@ -45,7 +44,7 @@ def parse_arguments(argv: List[str]) -> argparse.Namespace:
     parser.add_argument('--start', type=str, required=True, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end', type=str, required=True, help='End date (YYYY-MM-DD)')
     parser.add_argument('--interval', type=str, default='1d', help='Data interval (e.g. 1d, 1wk, 1mo)')
-    parser.add_argument('--risk_free_rate', type=float, default=0.0, help='Annual risk-free rate (e.g. 0.02 for 2%)')
+    parser.add_argument('--risk_free_rate', type=float, default=0.0, help='Annual risk-free rate (e.g. 0.02 for 2%%)')
     return parser.parse_args(argv)
 
 

@@ -15,9 +15,9 @@ interface MarketData {
   }[];
   signals: {
     sector_rotation: {
-      strongest_sectors: string[];
-      candidate_sectors: string[];
-      high_crowding_sectors: string[];
+      strongest: { sector: string; score: number }[];
+      candidate: { sector: string; score: number }[];
+      high_crowding: { sector: string; score: number }[];
     };
     fund_flows: {
       top_inflows: { sector: string; value: number }[];
@@ -92,9 +92,9 @@ export default function OverviewPage() {
               {/* Sector rotation */}
               <div className="p-3 border rounded-md bg-white dark:bg-gray-800 shadow-sm">
                 <h3 className="font-medium mb-1">板块轮动</h3>
-                <p className="text-sm">最强板块: {data.signals.sector_rotation.strongest_sectors.join(', ') || '—'}</p>
-                <p className="text-sm">候选板块: {data.signals.sector_rotation.candidate_sectors.join(', ') || '—'}</p>
-                <p className="text-sm">高拥挤风险: {data.signals.sector_rotation.high_crowding_sectors.join(', ') || '—'}</p>
+                <p className="text-sm">最强板块: {data.signals.sector_rotation.strongest.map((s) => s.sector).join(', ') || '—'}</p>
+                <p className="text-sm">候选板块: {data.signals.sector_rotation.candidate.map((s) => s.sector).join(', ') || '—'}</p>
+                <p className="text-sm">高拥挤风险: {data.signals.sector_rotation.high_crowding.map((s) => s.sector).join(', ') || '—'}</p>
               </div>
               {/* Fund flows */}
               <div className="p-3 border rounded-md bg-white dark:bg-gray-800 shadow-sm">

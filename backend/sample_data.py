@@ -8,8 +8,9 @@ and holdings so that the analysis routines can operate on them.  The
 intention is not to reflect real market prices but to produce numbers that
 behave similarly (i.e. trending up and down with some volatility).
 
-The sample data covers a handful of major Chinese and global indices
-(`000001.SS`, `399001.SZ`, `HSI`, `SPX`), a few mutual funds with basic
+The sample data covers major Chinese, Hong Kong and US indices
+(例如 `000001.SS`, `399001.SZ`, `399006.SZ`, `000300.SS`, `000852.SS`,
+`HSI`, `HSTECH`, `NDX`, `SPX`), a few mutual funds with basic
 metadata and holdings exposures, and a default user portfolio comprised
 of these funds.  Each price series spans roughly one year of daily
 observations.  Random seeds are fixed so that generated data is
@@ -97,10 +98,15 @@ def get_index_price_data() -> Dict[str, pd.DataFrame]:
     end = datetime.today()
     start = end - timedelta(days=365)
     indices = {
-        "000001.SS": (3000.0, 0.012, 0.0002),  # Shanghai Composite
-        "399001.SZ": (11000.0, 0.013, 0.00015),  # Shenzhen Component
-        "HSI": (18000.0, 0.015, -0.0001),  # Hang Seng Index (slight downtrend)
-        "SPX": (4500.0, 0.01, 0.00025),  # S&P 500
+        "000001.SS": (3000.0, 0.012, 0.0002),   # 上证指数
+        "399001.SZ": (11000.0, 0.013, 0.00015), # 深证成指
+        "399006.SZ": (2200.0, 0.017, 0.0001),   # 创业板指
+        "000300.SS": (3600.0, 0.011, 0.00018),  # 沪深300
+        "000852.SS": (6200.0, 0.014, 0.00008),  # 中证1000
+        "HSI": (18000.0, 0.015, -0.0001),       # 恒生指数
+        "HSTECH": (4200.0, 0.02, -0.00005),     # 恒生科技
+        "NDX": (15000.0, 0.012, 0.0003),        # 纳斯达克100
+        "SPX": (4500.0, 0.01, 0.00025),         # 标普500
     }
     data: Dict[str, pd.DataFrame] = {}
     seed_base = 42

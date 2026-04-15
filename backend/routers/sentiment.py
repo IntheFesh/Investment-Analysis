@@ -16,7 +16,7 @@ import pandas as pd
 from fastapi import APIRouter, Query
 
 from ..sample_data import get_index_price_data
-from ...data_analysis import compute_volatility
+from data_analysis import compute_volatility
 
 router = APIRouter()
 

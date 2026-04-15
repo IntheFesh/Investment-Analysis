@@ -28,7 +28,7 @@ async def bootstrap() -> Dict[str, Any]:
     timestamp = datetime.now(tz=timezone.utc).isoformat()
     data = {
         "market_views": ["A股主视角", "港股补充视角", "全球联动视角"],
-        "time_windows": ["5D", "20D", "60D", "120D", "YTD", "1Y"],
+        "time_windows": ["5D", "20D", "60D", "120D", "YTD", "1Y", "CUSTOM"],
         "research_modes": ["轻量模式", "研究模式"],
         "default_settings": {
             "market_view": "A股主视角",
@@ -36,7 +36,7 @@ async def bootstrap() -> Dict[str, Any]:
             "research_mode": "轻量模式",
             "default_export_format": ["JSON", "Markdown"],
         },
-        "portfolios": [],
+        "portfolios": ["pf_default", "全部组合汇总"],
     }
     return {
         "success": True,

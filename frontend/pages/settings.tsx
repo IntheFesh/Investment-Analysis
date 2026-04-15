@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
 import Layout from '@/components/Layout';
@@ -52,14 +52,17 @@ export default function SettingsPage() {
   const [profileForm, setProfileForm] = useState<RiskProfile | null>(null);
   const [prefsForm, setPrefsForm] = useState<Preferences | null>(null);
   // Populate forms when data loads
-  useState(() => {
+  useEffect(() => {
     if (profileData && !profileForm) {
       setProfileForm(profileData);
     }
+  }, [profileData, profileForm]);
+
+  useEffect(() => {
     if (prefsData && !prefsForm) {
       setPrefsForm(prefsData);
     }
-  });
+  }, [prefsData, prefsForm]);
   const riskTypes = ['保守型', '平衡型', '进攻型'];
   const horizons = ['1Y', '3Y', '5Y', '10Y'];
   const marketViews = ['A股主视角', '港股补充视角', '全球联动视角'];
