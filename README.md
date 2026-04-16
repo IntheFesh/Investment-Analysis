@@ -1,46 +1,51 @@
-# Investment‑Analysis
+# Investment-Analysis
 
-This repository provides a simple framework for downloading, analysing and visualising financial market data.  It is designed as a teaching example for students learning about portfolio management, risk measurement and optimisation.
+该仓库现在包含 **FastAPI 后端 + Next.js 前端** 两个服务，需分别启动。
 
-## Features
+## 1) 安装依赖
 
-The project is split into a few modules:
-
-* **`data_collection.py`** – Fetches historical price data and company financials using the `yfinance` API.
-* **`data_analysis.py`** – Calculates daily returns, volatility, correlation, Sharpe ratios and maximum drawdowns.
-* **`portfolio_optimization.py`** – Implements a basic mean–variance optimiser to find portfolio weights that maximise the Sharpe ratio subject to weights summing to 1.
-* **`visualizations.py`** – Provides helper functions for plotting price histories and risk–return scatter plots using `matplotlib`.
-* **`main.py`** – An example script tying together the above modules to download data for a list of tickers, compute metrics, optimise a portfolio and display results.
-
-## Installation
-
-The code depends on a handful of widely used Python libraries.  To install them into a virtual environment run:
-
+### 后端
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The key dependencies are:
-
-* `pandas` and `numpy` for data handling and numerical operations.
-* `yfinance` to fetch market data and company financials from Yahoo! Finance.
-* `scipy` for optimisation algorithms.
-* `matplotlib` for plotting.
-
-## Usage
-
-The easiest way to get started is to run the example script:
-
+### 前端
 ```bash
-python main.py --tickers AAPL MSFT GOOGL --start 2020-01-01 --end 2024-12-31
+cd frontend
+npm install
+cp .env.example .env.local
 ```
 
-This will download price data for Apple, Microsoft and Alphabet, compute a variety of risk metrics, optimise the portfolio weights and print the results.  It will also display plots of the individual price series and the risk–return profile of each asset.
+## 2) 启动服务
 
-You can customise the risk‑free rate used in the optimisation via the `--risk_free_rate` option, and adjust the output plots by modifying the functions in `visualizations.py`.
+### 启动后端（默认 8000）
+```bash
+source .venv/bin/activate
+uvicorn backend.app:app --host 127.0.0.1 --port 8000 --reload
+```
 
-## Notes
+### 启动前端（默认 3000）
+```bash
+cd frontend
+npm run dev
+```
 
-This repository is intended as a learning resource rather than a production‑ready trading tool.  The optimisation routine is deliberately simple and assumes a normal distribution of returns and unconstrained long‑only weights.  In practice, portfolio construction often requires more sophisticated models, constraints and robust estimation techniques.  Feel free to extend the code to meet more specific requirements.
+## 3) 对接关系
+
+- 前端通过 `NEXT_PUBLIC_API_BASE_URL` 直连后端。
+- 本地开发推荐：`NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:8000`。
+- 后端 CORS 默认允许 `http://127.0.0.1:3000` 与 `http://localhost:3000`。
+
+## 4) 快速验链路
+
+先直接访问后端 bootstrap 接口：
+```bash
+curl http://127.0.0.1:8000/api/v1/system/bootstrap
+```
+看到 JSON 后再打开前端页面：`http://127.0.0.1:3000`。
+
+## 5) 说明
+
+旧的数据分析脚本（`main.py` 等）仍保留用于离线分析；Web 应用以 `backend/` + `frontend/` 为准。

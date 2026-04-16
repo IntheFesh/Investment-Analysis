@@ -7,7 +7,10 @@ different resource groups.  The API is versioned under the ``/api/v1`` prefix.
 
 from __future__ import annotations
 
+import os
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .routers import (
     system,
@@ -23,6 +26,17 @@ from .routers import (
 
 app = FastAPI(title="Investment Research Platform API", version="v1")
 
+frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:3000,http://localhost:3000")
+allowed_origins = [origin.strip() for origin in frontend_origin.split(",") if origin.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Register routers under the /api/v1 prefix
 app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
 app.include_router(market.router, prefix="/api/v1/market", tags=["market"])
@@ -34,7 +48,7 @@ app.include_router(import_api.router, prefix="/api/v1/import", tags=["import"])
 app.include_router(export_api.router, prefix="/api/v1/export", tags=["export"])
 app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"])
 
-# Generic root endpoint to verify server status
+
 @app.get("/")
 async def root() -> dict:
     return {
