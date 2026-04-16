@@ -9,7 +9,7 @@ synthetic result synchronously and return it directly.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 import numpy as np
 import pandas as pd
@@ -23,7 +23,7 @@ router = APIRouter()
 
 
 class StatisticalSimulationRequest(BaseModel):
-    mode: str = Field("statistical", const=True)
+    mode: Literal["statistical"] = "statistical"
     horizon_days: int = 60
     num_paths: int = 1000
     confidence_interval: float = 0.95
@@ -31,9 +31,8 @@ class StatisticalSimulationRequest(BaseModel):
 
 
 class ScenarioSimulationRequest(BaseModel):
-    mode: str = Field("scenario", const=True)
+    mode: Literal["scenario"] = "scenario"
     scenario_ids: list[str]
-
 
 def _monte_carlo_simulation(returns: pd.Series, horizon: int, num_paths: int, bootstrap: bool) -> np.ndarray:
     """Generate Monte Carlo sample cumulative returns over a given horizon.

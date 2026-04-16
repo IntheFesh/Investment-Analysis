@@ -1,0 +1,5 @@
+1.后端启动：uvicorn backend.app:app --reload --port 8000
+
+2.前端启动：
+cd frontend
+npm run dev
