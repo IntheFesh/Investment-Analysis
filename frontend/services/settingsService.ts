@@ -38,7 +38,10 @@ export interface EnumCatalogue {
   research_modes: string[];
   themes: string[];
   export_formats: string[];
-  liquidity_preferences: string[];
+  liquidity_preferences: Array<{
+    id: string;
+    label_zh: string;
+  }>;
 }
 
 export const settingsService = {

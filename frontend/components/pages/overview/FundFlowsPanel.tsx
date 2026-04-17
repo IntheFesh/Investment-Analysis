@@ -9,21 +9,20 @@ interface Props {
 }
 
 export function FundFlowsPanel({ data }: Props) {
-  const combined = [
-    ...data.top_inflows.map((x) => ({ ...x, kind: 'in' as const })),
-    ...data.top_outflows.map((x) => ({ ...x, kind: 'out' as const })),
-  ];
+  const inflow = data.top_inflows.slice(0, 5).map((x) => ({ ...x, value: Math.abs(x.value) }));
+  const outflow = data.top_outflows.slice(0, 5).map((x) => ({ ...x, value: -Math.abs(x.value) }));
+  const combined = [...inflow, ...outflow].sort((a, b) => b.value - a.value);
   const categories = combined.map((x) => x.sector);
   const values = combined.map((x) => x.value);
 
   return (
     <Card>
       <CardHeader
-        title="资金偏好（代理成交量 × 板块收益）"
-        subtitle="由 /market/fund-flows 计算；正值代表潜在流入，负值代表流出。单位对齐后端成交量量级。"
+        title="流动性偏好"
+        subtitle="以板块成交活跃度与收益动量构建的偏好强度，反映资金风格倾向。"
       />
       {combined.length === 0 ? (
-        <EmptyState compact title="无资金流数据" description="当前窗口内成交量样本不足。" />
+        <EmptyState compact title="无偏好数据" description="当前窗口内样本不足。" />
       ) : (
         <div className="mt-4">
           <BarChart
@@ -32,8 +31,9 @@ export function FundFlowsPanel({ data }: Props) {
             horizontal
             signedColors
             valueFormatter={(v) => formatCompact(v)}
-            height={260}
+            height={280}
           />
+          <div className="mt-3 text-caption text-text-tertiary">{data.disclaimer}</div>
         </div>
       )}
     </Card>

@@ -396,7 +396,7 @@ def get_data_source() -> DataSourceAdapter:
     global _SELECTED
     if _SELECTED is not None:
         return _SELECTED
-    choice = os.getenv("DATA_SOURCE", "demo").strip().lower()
+    choice = os.getenv("DATA_SOURCE", "yfinance").strip().lower()
     factory = _ADAPTERS.get(choice, DemoSnapshotAdapter)
     _SELECTED = factory()
     logger.info("data source adapter: %s (tier=%s, grade=%s)", _SELECTED.name, _SELECTED.tier, _SELECTED.truth_grade)
