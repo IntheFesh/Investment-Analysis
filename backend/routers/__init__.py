@@ -1,11 +1,13 @@
 """API router package."""
 
 from . import (  # noqa: F401
+    backtest,
     export_api,
     fund,
     import_api,
     market,
     portfolio,
+    scheduler,
     sentiment,
     settings,
     simulation,
@@ -24,4 +26,6 @@ __all__ = [
     "export_api",
     "settings",
     "tasks",
+    "backtest",
+    "scheduler",
 ]

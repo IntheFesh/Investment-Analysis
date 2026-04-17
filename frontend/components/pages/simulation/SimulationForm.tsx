@@ -10,6 +10,12 @@ interface Preset {
   label: string;
 }
 
+interface HistoricalOption {
+  id: string;
+  label: string;
+  description?: string;
+}
+
 interface StatisticalParams {
   horizonDays: number;
   numPaths: number;
@@ -17,14 +23,21 @@ interface StatisticalParams {
   bootstrap: boolean;
 }
 
+export type SimulationMode = 'statistical' | 'scenario' | 'historical';
+
 interface Props {
-  mode: 'statistical' | 'scenario';
-  onModeChange: (mode: 'statistical' | 'scenario') => void;
+  mode: SimulationMode;
+  onModeChange: (mode: SimulationMode) => void;
   stat: StatisticalParams;
   onStatChange: (next: StatisticalParams) => void;
   presets: Preset[];
   selectedPresets: string[];
   onPresetToggle: (id: string) => void;
+  historicalEvents: HistoricalOption[];
+  selectedEventId: string | null;
+  onEventChange: (id: string) => void;
+  useSentimentStress: boolean;
+  onSentimentStressChange: (next: boolean) => void;
   disabled: boolean;
   onSubmit: () => void;
   taskProgress?: { state: string; progress: number; message: string } | null;
@@ -52,6 +65,11 @@ export function SimulationForm({
   presets,
   selectedPresets,
   onPresetToggle,
+  historicalEvents,
+  selectedEventId,
+  onEventChange,
+  useSentimentStress,
+  onSentimentStressChange,
   disabled,
   onSubmit,
   taskProgress,
@@ -59,17 +77,21 @@ export function SimulationForm({
 }: Props) {
   const modeItems = [
     { id: 'statistical', label: '统计模拟' },
+    { id: 'historical', label: '历史重演' },
     { id: 'scenario', label: '情景模拟' },
   ];
 
   return (
     <Card>
-      <CardHeader title="模拟参数" subtitle="提交后进入后端任务队列，返回 task_id 并轮询。" />
+      <CardHeader
+        title="模拟参数"
+        subtitle="三引擎共享任务管线：统计 Bootstrap、历史事件重演、叙事情景冲击。"
+      />
       <div className="mt-3">
         <Tabs
           variant="segment"
           value={mode}
-          onChange={(v) => onModeChange(v as 'statistical' | 'scenario')}
+          onChange={(v) => onModeChange(v as SimulationMode)}
           items={modeItems}
           size="sm"
         />
@@ -109,7 +131,7 @@ export function SimulationForm({
                 size="sm"
                 onClick={() => onStatChange({ ...stat, bootstrap: true })}
               >
-                Bootstrap
+                Block Bootstrap
               </Button>
               <Button
                 variant={!stat.bootstrap ? 'primary' : 'secondary'}
@@ -120,6 +142,41 @@ export function SimulationForm({
               </Button>
             </div>
           </div>
+        </div>
+      ) : mode === 'historical' ? (
+        <div className="mt-4 flex flex-col gap-3">
+          <div className="text-caption text-text-tertiary uppercase tracking-wide">
+            选择历史事件（后端 /historical-events）
+          </div>
+          {historicalEvents.length === 0 ? (
+            <div className="text-body-sm text-text-tertiary">后端未提供历史事件。</div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {historicalEvents.map((ev) => {
+                const active = selectedEventId === ev.id;
+                return (
+                  <button
+                    key={ev.id}
+                    type="button"
+                    onClick={() => onEventChange(ev.id)}
+                    className={
+                      'text-left rounded-md border px-3 py-2 transition-colors duration-standard ' +
+                      (active
+                        ? 'border-brand bg-brand/10'
+                        : 'border-border hover:border-border-strong')
+                    }
+                  >
+                    <div className="text-body-sm text-text-primary">{ev.label}</div>
+                    {ev.description ? (
+                      <div className="text-caption text-text-tertiary mt-1 line-clamp-2">
+                        {ev.description}
+                      </div>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       ) : (
         <div className="mt-4">
@@ -153,12 +210,25 @@ export function SimulationForm({
         </div>
       )}
 
+      <div className="mt-4 flex items-center gap-4 text-caption">
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={useSentimentStress}
+            onChange={(e) => onSentimentStressChange(e.target.checked)}
+          />
+          <span className="text-text-secondary">叠加当日情绪压力参数</span>
+        </label>
+      </div>
+
       <div className="mt-4 flex items-center gap-3">
         <Button
           variant="primary"
           size="sm"
           onClick={onSubmit}
-          loading={Boolean(taskProgress && (taskProgress.state === 'running' || taskProgress.state === 'pending'))}
+          loading={Boolean(
+            taskProgress && (taskProgress.state === 'running' || taskProgress.state === 'pending'),
+          )}
           disabled={disabled}
         >
           提交模拟任务

@@ -18,12 +18,15 @@ from fastapi.responses import JSONResponse
 
 from .core.data_source import get_data_source
 from .core.envelope import build_meta
+from .core.scheduler import register_default_jobs
 from .routers import (
+    backtest,
     export_api,
     fund,
     import_api,
     market,
     portfolio,
+    scheduler,
     sentiment,
     settings,
     simulation,
@@ -57,6 +60,13 @@ app.include_router(import_api.router, prefix="/api/v1/import", tags=["import"])
 app.include_router(export_api.router, prefix="/api/v1/export", tags=["export"])
 app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"])
 app.include_router(tasks_router.router, prefix="/api/v1/tasks", tags=["tasks"])
+app.include_router(backtest.router, prefix="/api/v1/backtest", tags=["backtest"])
+app.include_router(scheduler.router, prefix="/api/v1/scheduler", tags=["scheduler"])
+
+
+@app.on_event("startup")
+async def _on_startup() -> None:
+    register_default_jobs()
 
 
 @app.exception_handler(Exception)

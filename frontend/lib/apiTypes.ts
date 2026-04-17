@@ -23,15 +23,42 @@ export class ApiError extends Error {
   }
 }
 
+export type TruthGrade = 'A' | 'B' | 'C' | 'D' | 'E';
+export type SourceTier =
+  | 'production_authorized'
+  | 'production_delayed'
+  | 'research_only'
+  | 'derived'
+  | 'fallback_demo';
+export type LicenseScope = 'commercial' | 'research_only' | 'internal_preview';
+export type MarketSession = 'pre' | 'open' | 'close' | 'after' | 'snapshot';
+
 export interface ApiMeta {
   timestamp?: string;
   version?: string;
-  data_source?: string;
+  computed_at?: string;
+
+  // truth metadata
+  source_name?: string;
+  source_tier?: SourceTier;
+  truth_grade?: TruthGrade;
   is_demo?: boolean;
-  as_of_trading_day?: string;
-  as_of?: string;
-  market_session?: string;
+  is_proxy?: boolean;
+  is_realtime?: boolean;
+  delay_seconds?: number;
+  license_scope?: LicenseScope;
+  fallback_reason?: string | null;
+  trading_day?: string | null;
+  coverage_universe?: string;
+  calculation_method_version?: string;
+  evidence_count?: number;
+  market_session?: MarketSession;
   tz?: string;
+
+  // legacy aliases
+  data_source?: string;
+  as_of_trading_day?: string | null;
+  as_of?: string;
   [key: string]: unknown;
 }
 

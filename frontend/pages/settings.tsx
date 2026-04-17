@@ -9,34 +9,21 @@ import { SkeletonChart } from '@/components/ui/Skeleton';
 import { ErrorState } from '@/components/ui/ErrorState';
 import { Badge } from '@/components/ui/Badge';
 import {
-  useRiskProfile,
+  useEnumCatalogue,
   usePreferences,
-  useUpdateRiskProfile,
+  useRiskProfile,
   useUpdatePreferences,
+  useUpdateRiskProfile,
 } from '@/hooks/useSettings';
 import { useAppContext } from '@/context/AppContext';
 import { ApiError } from '@/lib/apiTypes';
-import type { RiskProfile, Preferences } from '@/services/settingsService';
-
-const RISK_TYPES = [
-  { value: 'conservative', label: '稳健' },
-  { value: 'balanced', label: '平衡' },
-  { value: 'growth', label: '进取' },
-  { value: 'aggressive', label: '激进' },
-];
-
-const HORIZONS = [
-  { value: '短期', label: '短期（< 1 年）' },
-  { value: '中期', label: '中期（1-3 年）' },
-  { value: '长期', label: '长期（> 3 年）' },
-];
-
-const EXPORT_FORMATS = ['JSON', 'Markdown', 'CSV', 'PNG'];
+import type { Preferences, RiskProfile } from '@/services/settingsService';
 
 export default function SettingsPage() {
   const { bootstrapData } = useAppContext();
   const profileQuery = useRiskProfile();
   const prefsQuery = usePreferences();
+  const enumsQuery = useEnumCatalogue();
   const updateProfile = useUpdateRiskProfile();
   const updatePrefs = useUpdatePreferences();
 
@@ -53,20 +40,30 @@ export default function SettingsPage() {
     if (prefsQuery.data && !prefs) setPrefs(prefsQuery.data.data);
   }, [prefsQuery.data, prefs]);
 
+  const enums = enumsQuery.data?.data;
+
+  const riskOptions = useMemo(
+    () =>
+      enums?.risk_types.map((r) => ({ value: r.id, label: r.label_zh })) ?? [
+        { value: 'balanced', label: '平衡' },
+      ],
+    [enums],
+  );
+
+  const horizonOptions = useMemo(
+    () =>
+      enums?.investment_horizons.map((h) => ({ value: h.id, label: h.label_zh })) ?? [
+        { value: 'mid', label: '中期' },
+      ],
+    [enums],
+  );
+
   const marketOptions = useMemo(
     () =>
       bootstrapData?.markets.map((m) => ({ value: m.id, label: m.label })) ?? [
-        { value: 'A股', label: 'A股' },
+        { value: 'cn_a', label: 'A股主视角' },
       ],
-    [bootstrapData]
-  );
-
-  const timeOptions = useMemo(
-    () =>
-      bootstrapData?.time_windows.map((w) => ({ value: w, label: w })) ?? [
-        { value: '20D', label: '20D' },
-      ],
-    [bootstrapData]
+    [bootstrapData],
   );
 
   const modeOptions = useMemo(
@@ -75,18 +72,29 @@ export default function SettingsPage() {
         { value: 'research', label: '研究模式' },
         { value: 'light', label: '轻量模式' },
       ],
-    [bootstrapData]
+    [bootstrapData],
   );
 
   const themeOptions = useMemo(
     () =>
       bootstrapData?.themes.map((t) => ({ value: t.id, label: t.label })) ?? [
+        { value: 'dark', label: '深色模式' },
+        { value: 'light', label: '浅色模式' },
         { value: 'system', label: '跟随系统' },
-        { value: 'dark', label: '暗色' },
-        { value: 'light', label: '明亮' },
       ],
-    [bootstrapData]
+    [bootstrapData],
   );
+
+  const liquidityOptions = useMemo(
+    () =>
+      (enums?.liquidity_preferences ?? ['low', 'mid', 'high']).map((id) => ({
+        value: id,
+        label: { low: '低换手', mid: '中等', high: '高流动性' }[id] ?? id,
+      })),
+    [enums],
+  );
+
+  const formatOptions = enums?.export_formats ?? ['JSON', 'Markdown', 'CSV', 'PNG'];
 
   const saveProfile = async () => {
     if (!profile) return;
@@ -119,30 +127,34 @@ export default function SettingsPage() {
     });
   };
 
+  const selectedRisk = enums?.risk_types.find((r) => r.id === profile?.risk_type);
+
   const meta = profileQuery.data?.meta ?? prefsQuery.data?.meta;
 
   return (
     <Layout
       title="设置"
-      subtitle="风险画像、研究默认视图与导出偏好——写入后端并联动全局 Context。"
+      subtitle="风险画像驱动组合诊断/仿真阈值；研究偏好为各模块提供默认视角。保存即写入后端并失效相关缓存。"
       meta={meta}
       showPortfolio={false}
+      showMarket={false}
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
           <CardHeader
             title="风险画像"
-            subtitle="影响组合诊断与推荐的基准阈值。"
+            subtitle="画像决定组合目标波动区间、回撤容忍与流动性要求。"
             action={
-              profile ? (
+              selectedRisk ? (
                 <Badge tone="brand" size="xs">
-                  {RISK_TYPES.find((r) => r.value === profile.risk_type)?.label ?? profile.risk_type}
+                  {selectedRisk.label_zh} · 目标波动 {(selectedRisk.target_vol[0] * 100).toFixed(0)}-
+                  {(selectedRisk.target_vol[1] * 100).toFixed(0)}%
                 </Badge>
               ) : null
             }
           />
           {profileQuery.isLoading && !profile ? (
-            <SkeletonChart height={200} />
+            <SkeletonChart height={220} />
           ) : profileQuery.error ? (
             <ErrorState error={profileQuery.error} onRetry={() => profileQuery.refetch()} />
           ) : profile ? (
@@ -152,23 +164,75 @@ export default function SettingsPage() {
                 size="sm"
                 value={profile.risk_type}
                 onChange={(e) => setProfile({ ...profile, risk_type: e.target.value })}
-                options={RISK_TYPES}
+                options={riskOptions}
               />
               <Select
                 label="投资期限"
                 size="sm"
                 value={profile.investment_horizon}
+                onChange={(e) => setProfile({ ...profile, investment_horizon: e.target.value })}
+                options={horizonOptions}
+              />
+              <Select
+                label="流动性偏好"
+                size="sm"
+                value={profile.liquidity_preference ?? ''}
                 onChange={(e) =>
-                  setProfile({ ...profile, investment_horizon: e.target.value })
+                  setProfile({ ...profile, liquidity_preference: e.target.value || null })
                 }
-                options={HORIZONS}
+                options={[{ value: '', label: '未指定' }, ...liquidityOptions]}
               />
               <Input
-                label="防守仓位 (%)"
+                label="回撤容忍 (0-0.9)"
+                size="sm"
+                type="number"
+                step="0.01"
+                min={0}
+                max={0.9}
+                value={profile.drawdown_tolerance ?? ''}
+                onChange={(e) =>
+                  setProfile({
+                    ...profile,
+                    drawdown_tolerance: e.target.value === '' ? null : Number(e.target.value),
+                  })
+                }
+              />
+              <Input
+                label="年化收益预期 (-0.5 ~ 1.0)"
+                size="sm"
+                type="number"
+                step="0.01"
+                min={-0.5}
+                max={1}
+                value={profile.return_expectation ?? ''}
+                onChange={(e) =>
+                  setProfile({
+                    ...profile,
+                    return_expectation: e.target.value === '' ? null : Number(e.target.value),
+                  })
+                }
+              />
+              <Input
+                label="问卷评分 (0-100)"
                 size="sm"
                 type="number"
                 min={0}
                 max={100}
+                value={profile.questionnaire_score ?? ''}
+                onChange={(e) =>
+                  setProfile({
+                    ...profile,
+                    questionnaire_score: e.target.value === '' ? null : Number(e.target.value),
+                  })
+                }
+              />
+              <Input
+                label="防御比例 (0-1)"
+                size="sm"
+                type="number"
+                step="0.05"
+                min={0}
+                max={1}
                 value={profile.defensive_ratio ?? ''}
                 onChange={(e) =>
                   setProfile({
@@ -178,11 +242,12 @@ export default function SettingsPage() {
                 }
               />
               <Input
-                label="进攻仓位 (%)"
+                label="进攻比例 (0-1)"
                 size="sm"
                 type="number"
+                step="0.05"
                 min={0}
-                max={100}
+                max={1}
                 value={profile.offensive_ratio ?? ''}
                 onChange={(e) =>
                   setProfile({
@@ -191,22 +256,7 @@ export default function SettingsPage() {
                   })
                 }
               />
-              <Input
-                label="问卷评分"
-                size="sm"
-                type="number"
-                min={0}
-                max={100}
-                value={profile.questionnaire_score ?? ''}
-                onChange={(e) =>
-                  setProfile({
-                    ...profile,
-                    questionnaire_score:
-                      e.target.value === '' ? null : Number(e.target.value),
-                  })
-                }
-              />
-              <div className="flex items-end">
+              <div className="md:col-span-2 flex items-center gap-3">
                 <Button
                   variant="primary"
                   size="sm"
@@ -215,16 +265,19 @@ export default function SettingsPage() {
                 >
                   保存风险画像
                 </Button>
+                {profileError ? <span className="text-caption text-danger">{profileError}</span> : null}
+                {selectedRisk ? (
+                  <span className="text-caption text-text-tertiary">
+                    {selectedRisk.description ?? ''}
+                  </span>
+                ) : null}
               </div>
-              {profileError ? (
-                <div className="md:col-span-2 text-caption text-danger">{profileError}</div>
-              ) : null}
             </div>
           ) : null}
         </Card>
 
         <Card>
-          <CardHeader title="研究偏好" subtitle="默认市场视角、时间窗、研究模式与主题。" />
+          <CardHeader title="研究偏好" subtitle="默认市场视角、研究模式、主题与导出行为。" />
           {prefsQuery.isLoading && !prefs ? (
             <SkeletonChart height={260} />
           ) : prefsQuery.error ? (
@@ -237,13 +290,6 @@ export default function SettingsPage() {
                 value={prefs.market_view}
                 onChange={(e) => setPrefs({ ...prefs, market_view: e.target.value })}
                 options={marketOptions}
-              />
-              <Select
-                label="默认时间窗"
-                size="sm"
-                value={prefs.time_window}
-                onChange={(e) => setPrefs({ ...prefs, time_window: e.target.value })}
-                options={timeOptions}
               />
               <Select
                 label="研究模式"
@@ -265,7 +311,7 @@ export default function SettingsPage() {
                   默认导出格式
                 </div>
                 <div className="flex flex-wrap gap-3">
-                  {EXPORT_FORMATS.map((f) => (
+                  {formatOptions.map((f) => (
                     <Toggle
                       key={f}
                       checked={prefs.default_export_format.includes(f)}
@@ -303,9 +349,7 @@ export default function SettingsPage() {
                 >
                   保存偏好
                 </Button>
-                {prefsError ? (
-                  <div className="text-caption text-danger">{prefsError}</div>
-                ) : null}
+                {prefsError ? <span className="text-caption text-danger">{prefsError}</span> : null}
               </div>
             </div>
           ) : null}

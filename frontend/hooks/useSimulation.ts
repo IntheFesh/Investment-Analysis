@@ -8,6 +8,14 @@ export function useSimulationPresets() {
   });
 }
 
+export function useHistoricalEvents() {
+  return useQuery(
+    queryKeys.simulation.historicalEvents(),
+    simulationService.listHistoricalEvents,
+    { staleTime: 24 * 60 * 60 * 1000 },
+  );
+}
+
 export function useSimulationMutation() {
   return useMutation(async (input: SimulationInput) => simulationService.run(input));
 }

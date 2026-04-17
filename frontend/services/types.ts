@@ -43,10 +43,14 @@ export interface BreadthStats {
   market_heat: number;
 }
 
+import type { Evidence } from '@/components/ui/EvidencePanel';
+
 export interface Explanation {
-  event: string;
-  impact: string;
-  evidence: string;
+  id: string;
+  fact: string;
+  inference: string;
+  risk: string;
+  evidence: Evidence;
   tag: string;
 }
 
@@ -64,10 +68,15 @@ export interface MarketOverview {
 }
 
 export interface SentimentFactor {
+  id: string;
   name: string;
-  score: number;
+  short_score: number;
+  mid_score: number;
   direction: 'up' | 'down';
   driver: string;
+  indicators: Record<string, unknown>;
+  indicators_mid?: Record<string, unknown>;
+  evidence: Evidence;
 }
 
 export interface SentimentTimePoint {
@@ -84,16 +93,23 @@ export interface SentimentContribution {
 
 export interface SentimentOverview {
   market_view: string;
+  universe_id?: string;
+  universe_label?: string;
   time_window: string;
   short_term_score: number;
   mid_term_score: number;
   short_term_label: string;
   mid_term_label: string;
+  short_term_state?: string;
+  mid_term_state?: string;
+  state_transition?: Record<string, unknown>;
   short_term_drivers: string[];
   mid_term_drivers: string[];
   factors: SentimentFactor[];
   time_series: SentimentTimePoint[];
   contributions: SentimentContribution[];
+  stress_parameters?: Record<string, unknown>;
+  method_version?: string;
 }
 
 export interface PortfolioSummary {
@@ -139,13 +155,45 @@ export interface PortfolioOverview {
   target_deviation: PortfolioTargetDeviation;
 }
 
+export interface PortfolioRiskWarning {
+  kind: string;
+  severity?: string;
+  message: string;
+  evidence?: Evidence;
+}
+
+export interface PortfolioAdjustment {
+  action: string;
+  expected_effect: string;
+  preconditions: string;
+  side_effects: string;
+  evidence?: Evidence;
+}
+
 export interface PortfolioDiagnosis {
   portfolio_id: string;
-  risk_profile: { risk_type: string; investment_horizon: string };
-  risk_warnings: Array<{ kind: string; message: string }>;
-  environment_fit: { tone: string; message: string };
+  risk_profile: {
+    risk_type: string;
+    risk_type_label?: string;
+    investment_horizon: string;
+    investment_horizon_label?: string;
+    target_vol_range?: [number, number];
+    drawdown_tolerance?: number | null;
+    liquidity_preference?: string | null;
+    return_expectation?: number | null;
+  };
+  risk_warnings: PortfolioRiskWarning[];
+  environment_fit: {
+    tone: string;
+    message: string;
+    sentiment_short_score?: number | null;
+    sentiment_short_state?: string | null;
+  };
+  attribution?: unknown;
+  adjustments?: PortfolioAdjustment[];
   optimization: string[];
   evidence: Record<string, string>;
+  method_version?: string;
 }
 
 export interface PortfolioExportPack {
@@ -250,7 +298,23 @@ export interface ScenarioSimulationResult {
   presets: Array<{ id: string; label: string }>;
 }
 
-export type SimulationResult = StatisticalSimulationResult | ScenarioSimulationResult;
+export interface HistoricalSimulationResult {
+  mode: 'historical';
+  portfolio_id: string;
+  event_id: string;
+  event_label: string;
+  description?: string;
+  path: Array<{ date: string; return: number; cum_return: number }>;
+  total_return?: number;
+  max_drawdown?: number;
+  stress_adjusted_worst?: number;
+  stress_parameters?: Record<string, unknown> | null;
+}
+
+export type SimulationResult =
+  | StatisticalSimulationResult
+  | ScenarioSimulationResult
+  | HistoricalSimulationResult;
 
 export interface ExportTaskResult {
   page: string;
