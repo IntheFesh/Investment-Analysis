@@ -36,8 +36,17 @@ def _fetch_news(market_view: str) -> Dict[str, Any]:
     def _query(q: str, count: int = 5) -> List[Dict[str, Any]]:
         url = "https://query1.finance.yahoo.com/v1/finance/search?" + urllib.parse.urlencode({"q": q, "newsCount": count})
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=4.0) as resp:  # nosec B310
-            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+        payload = None
+        last_exc: Exception | None = None
+        for _attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=2.8) as resp:  # nosec B310
+                    payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        if payload is None:
+            raise RuntimeError(f"yahoo_news_failed: {last_exc}")
         rows = payload.get("news") or []
         out: List[Dict[str, Any]] = []
         for item in rows:
@@ -496,17 +505,9 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
                     "pe_percentile": round(_rolling_rank(close.pct_change().rolling(20).mean().dropna()) * 100, 1),
                     "pb_percentile": round(_rolling_rank(close.pct_change().rolling(60).mean().dropna()) * 100, 1),
                 },
-                "contributors": [
-                    {"name": "权重蓝筹", "value": round(max(-1.0, min(1.0, change_pct / 3)), 2)},
-                    {"name": "成长风格", "value": round(max(-1.0, min(1.0, change_pct / 4)), 2)},
-                    {"name": "防御风格", "value": round(max(-1.0, min(1.0, -change_pct / 5)), 2)},
-                ],
-                "basis": {"name": "期现价差", "value": round(change_pct * 0.18, 2)},
-                "leaders": [
-                    {"name": "领涨成分A", "change_percent": round(change_pct * 1.35, 2)},
-                    {"name": "领涨成分B", "change_percent": round(change_pct * 1.08, 2)},
-                    {"name": "领跌成分C", "change_percent": round(change_pct * -0.75, 2)},
-                ],
+                "contributors": [],
+                "basis": {"name": "数据状态", "value": 0.0},
+                "leaders": [],
                 "as_of": df.index[-1].strftime("%Y-%m-%d %H:%M"),
                 "role": "headline" if symbol in universe.headline_indices else "support",
                 "data_quality": {

@@ -1,0 +1,305 @@
+"""Asynchronous market snapshot pipeline with layered cache reads.
+
+Read path (API): L1 memory -> L2 redis -> L3 sqlite snapshot.
+Write path (scheduler): async refresh jobs -> normalize -> write L3/L2/L1.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import random
+import sqlite3
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple
+
+from ..analytics.market import build_overview
+from .data_source import get_data_source
+
+
+logger = logging.getLogger(__name__)
+
+VIEWS = ("cn_a", "hk", "global")
+WINDOWS = ("5D", "20D", "60D", "120D", "YTD", "1Y")
+
+
+@dataclass
+class PipelineStats:
+    l1_hits: int = 0
+    l2_hits: int = 0
+    l3_hits: int = 0
+    misses: int = 0
+    refresh_ok: int = 0
+    refresh_failed: int = 0
+    fallback_served: int = 0
+    api_latency_total_ms: float = 0.0
+    api_count: int = 0
+    upstream_latency_total_ms: float = 0.0
+    upstream_count: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        avg_api = self.api_latency_total_ms / self.api_count if self.api_count else 0.0
+        avg_upstream = self.upstream_latency_total_ms / self.upstream_count if self.upstream_count else 0.0
+        hit_total = self.l1_hits + self.l2_hits + self.l3_hits + self.misses
+        hit_rate = (self.l1_hits + self.l2_hits + self.l3_hits) / hit_total if hit_total else 0.0
+        return {
+            "cache": {
+                "l1_hits": self.l1_hits,
+                "l2_hits": self.l2_hits,
+                "l3_hits": self.l3_hits,
+                "misses": self.misses,
+                "hit_rate": round(hit_rate, 4),
+            },
+            "refresh": {
+                "ok": self.refresh_ok,
+                "failed": self.refresh_failed,
+                "fallback_served": self.fallback_served,
+                "avg_upstream_latency_ms": round(avg_upstream, 2),
+            },
+            "api": {
+                "avg_response_ms": round(avg_api, 2),
+                "count": self.api_count,
+            },
+        }
+
+
+class RedisLayer:
+    def __init__(self, ttl_seconds: int = 90) -> None:
+        self._ttl = ttl_seconds
+        self._client = None
+        url = os.getenv("REDIS_URL", "").strip()
+        if not url:
+            return
+        try:
+            import redis  # type: ignore
+
+            self._client = redis.Redis.from_url(url, socket_connect_timeout=0.3, socket_timeout=0.3, decode_responses=True)
+            self._client.ping()
+            logger.info("market pipeline redis enabled")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("market pipeline redis disabled: %s", exc)
+            self._client = None
+
+    def get(self, key: str) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], float]]:
+        if self._client is None:
+            return None
+        try:
+            raw = self._client.get(key)
+            if not raw:
+                return None
+            data = json.loads(raw)
+            return data["payload"], data["meta"], float(data.get("stored_at", 0.0))
+        except Exception:  # noqa: BLE001
+            return None
+
+    def set(self, key: str, payload: Dict[str, Any], meta: Dict[str, Any], stored_at: float) -> None:
+        if self._client is None:
+            return
+        try:
+            self._client.setex(key, self._ttl, json.dumps({"payload": payload, "meta": meta, "stored_at": stored_at}, ensure_ascii=False))
+        except Exception:  # noqa: BLE001
+            return
+
+
+class SQLiteLayer:
+    def __init__(self, db_path: str) -> None:
+        self._path = Path(db_path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS market_snapshots (
+                snapshot_key TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                meta_json TEXT NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
+        self._conn.commit()
+
+    def get(self, key: str) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], float]]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT payload_json, meta_json, updated_at FROM market_snapshots WHERE snapshot_key = ?",
+                (key,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return json.loads(row[0]), json.loads(row[1]), float(row[2])
+
+    def set(self, key: str, payload: Dict[str, Any], meta: Dict[str, Any], updated_at: float) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO market_snapshots (snapshot_key, payload_json, meta_json, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(snapshot_key) DO UPDATE SET
+                  payload_json=excluded.payload_json,
+                  meta_json=excluded.meta_json,
+                  updated_at=excluded.updated_at
+                """,
+                (key, json.dumps(payload, ensure_ascii=False), json.dumps(meta, ensure_ascii=False), updated_at),
+            )
+            self._conn.commit()
+
+
+class MarketSnapshotPipeline:
+    def __init__(self) -> None:
+        self._l1: Dict[str, Tuple[float, Dict[str, Any], Dict[str, Any], float]] = {}
+        self._l1_lock = threading.Lock()
+        self._l1_ttl = float(os.getenv("MARKET_L1_TTL_SECONDS", "10"))
+        self._l2 = RedisLayer(ttl_seconds=int(os.getenv("MARKET_L2_TTL_SECONDS", "90")))
+        self._l3 = SQLiteLayer(os.getenv("MARKET_SNAPSHOT_DB", "backend/data/market_snapshots.db"))
+        self._stats = PipelineStats()
+        self._stats_lock = threading.Lock()
+        self._task: Optional[asyncio.Task[None]] = None
+        self._stop = asyncio.Event()
+        self._interval = float(os.getenv("MARKET_PIPELINE_INTERVAL_SECONDS", "30"))
+        self._semaphore = asyncio.Semaphore(int(os.getenv("MARKET_PIPELINE_CONCURRENCY", "6")))
+
+    @staticmethod
+    def _key(view: str, window: str, adapter_name: str) -> str:
+        return f"market:{view}:{window}:{adapter_name}"
+
+    async def start(self) -> None:
+        if self._task and not self._task.done():
+            return
+        self._stop.clear()
+        await self.refresh_all()
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task:
+            await self._task
+
+    async def _loop(self) -> None:
+        while not self._stop.is_set():
+            started = time.perf_counter()
+            try:
+                await self.refresh_all()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("market pipeline refresh cycle failed: %s", exc)
+            elapsed = time.perf_counter() - started
+            sleep_for = max(2.0, self._interval - elapsed) + random.uniform(0.0, 0.7)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=sleep_for)
+            except asyncio.TimeoutError:
+                continue
+
+    async def refresh_all(self) -> None:
+        adapter = get_data_source()
+        jobs = [self._refresh_one(adapter.name, v, w) for v in VIEWS for w in WINDOWS]
+        await asyncio.gather(*jobs, return_exceptions=True)
+
+    async def _refresh_one(self, adapter_name: str, view: str, window: str) -> None:
+        async with self._semaphore:
+            started = time.perf_counter()
+            try:
+                payload, meta = await asyncio.wait_for(asyncio.to_thread(self._build_snapshot, view, window), timeout=8.0)
+                latency_ms = (time.perf_counter() - started) * 1000
+                meta["snapshot_updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+                meta["snapshot_latency_ms"] = round(latency_ms, 2)
+                stored_at = time.monotonic()
+                key = self._key(view, window, adapter_name)
+                self._l3.set(key, payload, meta, stored_at)
+                self._l2.set(key, payload, meta, stored_at)
+                with self._l1_lock:
+                    self._l1[key] = (stored_at, payload, meta, stored_at)
+                with self._stats_lock:
+                    self._stats.refresh_ok += 1
+                    self._stats.upstream_count += 1
+                    self._stats.upstream_latency_total_ms += latency_ms
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("market snapshot refresh failed for %s/%s: %s", view, window, exc)
+                with self._stats_lock:
+                    self._stats.refresh_failed += 1
+
+    @staticmethod
+    def _build_snapshot(view: str, window: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        adapter = get_data_source()
+        payload, src_meta, ev_count = build_overview(adapter, window, view)
+        src_meta["evidence_count"] = ev_count
+        src_meta["snapshot_mode"] = "async_precomputed"
+        src_meta["freshness_label"] = "research" if src_meta.get("source_tier") in {"research_only", "derived"} else "delayed"
+        return payload, src_meta
+
+    def get_snapshot(self, view: str, window: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], str]:
+        started = time.perf_counter()
+        adapter = get_data_source()
+        key = self._key(view, window, adapter.name)
+        now = time.monotonic()
+
+        with self._l1_lock:
+            l1 = self._l1.get(key)
+            if l1 and (now - l1[0]) <= self._l1_ttl:
+                with self._stats_lock:
+                    self._stats.l1_hits += 1
+                self._record_api_latency(started)
+                return l1[1], dict(l1[2]), "l1"
+
+        l2 = self._l2.get(key)
+        if l2:
+            payload, meta, stored_at = l2
+            with self._l1_lock:
+                self._l1[key] = (now, payload, meta, stored_at)
+            with self._stats_lock:
+                self._stats.l2_hits += 1
+            self._record_api_latency(started)
+            return payload, dict(meta), "l2"
+
+        l3 = self._l3.get(key)
+        if l3:
+            payload, meta, stored_at = l3
+            self._l2.set(key, payload, meta, stored_at)
+            with self._l1_lock:
+                self._l1[key] = (now, payload, meta, stored_at)
+            with self._stats_lock:
+                self._stats.l3_hits += 1
+            self._record_api_latency(started)
+            return payload, dict(meta), "l3"
+
+        with self._stats_lock:
+            self._stats.misses += 1
+        self._record_api_latency(started)
+        return None, {
+            "source_name": adapter.name,
+            "source_tier": adapter.tier,
+            "truth_grade": adapter.truth_grade,
+            "is_realtime": False,
+            "fallback_reason": "snapshot_not_ready",
+            "snapshot_mode": "cache_only",
+        }, "miss"
+
+    def _record_api_latency(self, started: float) -> None:
+        duration_ms = (time.perf_counter() - started) * 1000
+        with self._stats_lock:
+            self._stats.api_count += 1
+            self._stats.api_latency_total_ms += duration_ms
+
+    def register_fallback_served(self) -> None:
+        with self._stats_lock:
+            self._stats.fallback_served += 1
+
+    def stats(self) -> Dict[str, Any]:
+        with self._stats_lock:
+            return self._stats.to_dict()
+
+
+_PIPELINE: Optional[MarketSnapshotPipeline] = None
+
+
+def get_market_pipeline() -> MarketSnapshotPipeline:
+    global _PIPELINE
+    if _PIPELINE is None:
+        _PIPELINE = MarketSnapshotPipeline()
+    return _PIPELINE

@@ -6,7 +6,7 @@ const apiBaseUrl =
 
 export const apiClient = axios.create({
   baseURL: apiBaseUrl,
-  timeout: 15000,
+  timeout: 10000,
 });
 
 const parseAxiosError = (error: AxiosError): ApiError => {

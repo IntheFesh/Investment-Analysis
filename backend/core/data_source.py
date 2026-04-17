@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import random
 import threading
 import time
 import urllib.parse
@@ -107,7 +108,7 @@ class ResearchRateLimiter:
             # mark slot in advance so concurrent callers still serialise
             self._last[vendor] = last + sleep_for if sleep_for > 0 else time.monotonic()
         if sleep_for > 0:
-            time.sleep(sleep_for)
+            time.sleep(sleep_for + random.uniform(0.0, 0.25))
         return sleep_for
 
 
@@ -430,8 +431,18 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
             f"https://push2his.eastmoney.com/api/qt/stock/kline/get?{query}",
             headers={"User-Agent": "Mozilla/5.0"},
         )
-        with urllib.request.urlopen(req, timeout=4.5) as resp:  # nosec B310
-            raw = resp.read().decode("utf-8", errors="ignore")
+        research_limiter().wait("eastmoney")
+        raw = ""
+        last_exc: Exception | None = None
+        for _attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=2.8) as resp:  # nosec B310
+                    raw = resp.read().decode("utf-8", errors="ignore")
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        if not raw:
+            raise RuntimeError(f"eastmoney_timeout: {last_exc}")
 
         import json
 
