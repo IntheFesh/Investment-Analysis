@@ -18,6 +18,7 @@ from ..core.envelope import ok
 from ..core.market_pipeline import get_market_pipeline
 
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -100,9 +101,10 @@ async def market_overview(
     time_window: str = Query("20D"),
     fields: Optional[List[str]] = Query(None),
 ) -> Dict[str, Any]:
-    payload, meta = _get_overview(market_view, time_window)
+    payload, meta = await _get_overview(market_view, time_window)
     if fields:
-        payload = {k: v for k, v in payload.items() if k in set(fields) | {"market_view", "time_window", "universe_id"}}
+        keep = set(fields) | {"market_view", "time_window", "universe_id"}
+        payload = {k: v for k, v in payload.items() if k in keep}
     return ok(payload, meta=meta)
 
 
@@ -138,7 +140,7 @@ async def cross_asset(time_window: str = Query("20D"), market_view: str = Query(
 
 @router.get("/explanations")
 async def explanations(time_window: str = Query("20D"), market_view: str = Query("cn_a")) -> Dict[str, Any]:
-    payload, meta = _get_overview(market_view, time_window)
+    payload, meta = await _get_overview(market_view, time_window)
     return ok(
         {"explanations": payload.get("explanations", []), "summary": payload.get("summary", "")},
         meta=meta,

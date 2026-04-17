@@ -313,6 +313,56 @@ class DemoSnapshotAdapter(DataSourceAdapter):
 # ---------------------------------------------------------------------------
 
 
+_YF_PRIMARY_MAP: Dict[str, str] = {
+    "000001.SS": "000001.SS",
+    "399001.SZ": "399001.SZ",
+    "399006.SZ": "399006.SZ",
+    "000300.SS": "000300.SS",
+    "000852.SS": "000852.SS",
+    "000905.SS": "000905.SS",
+    "000688.SS": "000688.SS",
+    "HSI": "^HSI",
+    "HSTECH": "^HSTECH",
+    "HSCEI": "^HSCE",
+    "NDX": "^NDX",
+    "SPX": "^GSPC",
+    "VIX": "^VIX",
+}
+
+# Secondary tickers tried when the primary 404s (Yahoo regularly moves
+# Hang Seng indices around and some mirrors are more reliable than
+# others). Order matters.
+_YF_FALLBACK_MAP: Dict[str, List[str]] = {
+    "HSTECH": ["^HSTE", "HKTECH.HK", "3032.HK"],
+    "HSCEI":  ["^HSCC", "2828.HK"],
+    "HSI":    ["2800.HK"],
+}
+
+
+# Module-level cache keyed by logical symbol. Holds the most recent
+# successful pull so transient yfinance outages don't wipe the snapshot.
+_YF_PRICE_CACHE: Dict[str, Tuple[pd.DataFrame, float]] = {}
+_YF_PRICE_CACHE_LOCK = threading.Lock()
+_YF_PRICE_CACHE_TTL = float(os.getenv("YF_PRICE_CACHE_TTL", "600"))
+
+
+def _yf_cache_put(logical: str, df: pd.DataFrame) -> None:
+    with _YF_PRICE_CACHE_LOCK:
+        _YF_PRICE_CACHE[logical] = (df.copy(), time.monotonic())
+
+
+def _yf_cache_get(logical: str, max_age: Optional[float] = None) -> Optional[pd.DataFrame]:
+    max_age = max_age if max_age is not None else _YF_PRICE_CACHE_TTL
+    with _YF_PRICE_CACHE_LOCK:
+        entry = _YF_PRICE_CACHE.get(logical)
+    if entry is None:
+        return None
+    df, cached_at = entry
+    if (time.monotonic() - cached_at) > max_age:
+        return df  # return stale; caller decides
+    return df
+
+
 class YFinanceResearchAdapter(DemoSnapshotAdapter):
     """Yahoo Finance open endpoint — research only, US/HK coverage.
 
@@ -360,6 +410,7 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
 
     _degraded: bool = False
     _degrade_reason: Optional[str] = None
+    _missing: List[str] = []
 
     @classmethod
     def _get_yfinance(cls) -> Any:
@@ -445,6 +496,7 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
         if self._degraded:
             base.source_name = "yfinance-research-degraded"
             base.fallback_reason = self._degrade_reason or "degraded"
+            base.is_proxy = True
         return base
 
 

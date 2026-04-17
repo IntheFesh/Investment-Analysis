@@ -1,4 +1,9 @@
-import { apiClient, unwrapApiEnvelope, type UnwrappedEnvelope } from '@/lib/apiClient';
+import {
+  apiClient,
+  unwrapApiEnvelope,
+  withRequestConfig,
+  type UnwrappedEnvelope,
+} from '@/lib/apiClient';
 import type { MarketOverview } from './types';
 
 export interface MarketQuery {
