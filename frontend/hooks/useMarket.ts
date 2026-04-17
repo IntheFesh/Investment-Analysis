@@ -1,4 +1,3 @@
-import { useEffect } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { marketService } from '@/services/marketService';
 import { queryKeys } from '@/lib/queryKeys';
@@ -10,12 +9,6 @@ export function useMarketOverview(timeWindow: string = '20D') {
   const { marketView } = useAppContext();
   const qc = useQueryClient();
   const queryKey = queryKeys.market.overview(marketView, timeWindow);
-
-  useEffect(() => {
-    // Abort in-flight requests for other (view,window) combos so switching
-    // does not pile up stale fetches.
-    qc.cancelQueries({ queryKey: ['market', 'overview'], exact: false });
-  }, [qc, marketView, timeWindow]);
 
   return useQuery<UnwrappedEnvelope<MarketOverview>>(
     queryKey,
