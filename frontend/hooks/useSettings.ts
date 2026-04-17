@@ -18,16 +18,30 @@ export function usePreferences() {
   });
 }
 
+export function useEnumCatalogue() {
+  return useQuery(queryKeys.settings.enums(), settingsService.getEnums, {
+    staleTime: 60 * 60 * 1000,
+  });
+}
+
 export function useUpdateRiskProfile() {
   const qc = useQueryClient();
   return useMutation((profile: RiskProfile) => settingsService.updateProfile(profile), {
-    onSuccess: () => qc.invalidateQueries(queryKeys.settings.profile()),
+    onSuccess: () => {
+      qc.invalidateQueries(queryKeys.settings.profile());
+      qc.invalidateQueries(['portfolio']);
+      qc.invalidateQueries(['sentiment']);
+      qc.invalidateQueries(['market']);
+    },
   });
 }
 
 export function useUpdatePreferences() {
   const qc = useQueryClient();
   return useMutation((prefs: Preferences) => settingsService.updatePreferences(prefs), {
-    onSuccess: () => qc.invalidateQueries(queryKeys.settings.preferences()),
+    onSuccess: () => {
+      qc.invalidateQueries(queryKeys.settings.preferences());
+      qc.invalidateQueries(queryKeys.system.bootstrap());
+    },
   });
 }

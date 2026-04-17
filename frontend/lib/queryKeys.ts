@@ -22,18 +22,21 @@ export const queryKeys = {
       ['market', 'breadth', marketView, timeWindow] as const,
     explanations: (marketView: string, timeWindow: string) =>
       ['market', 'explanations', marketView, timeWindow] as const,
+    crossAsset: (marketView: string, timeWindow: string) =>
+      ['market', 'cross-asset', marketView, timeWindow] as const,
   },
   sentiment: {
     overview: (marketView: string, timeWindow: string) =>
       ['sentiment', 'overview', marketView, timeWindow] as const,
+    snapshotLight: (marketView: string) =>
+      ['sentiment', 'snapshot-light', marketView] as const,
   },
   portfolio: {
-    overview: (portfolioId: string, timeWindow: string) =>
-      ['portfolio', 'overview', portfolioId, timeWindow] as const,
-    diagnosis: (portfolioId: string, timeWindow: string, marketView: string) =>
-      ['portfolio', 'diagnosis', portfolioId, timeWindow, marketView] as const,
-    exportPack: (portfolioId: string) =>
-      ['portfolio', 'export-pack', portfolioId] as const,
+    overview: (portfolioId: string) => ['portfolio', 'overview', portfolioId] as const,
+    diagnosis: (portfolioId: string, marketView: string) =>
+      ['portfolio', 'diagnosis', portfolioId, marketView] as const,
+    exportPack: (portfolioId: string, marketView: string) =>
+      ['portfolio', 'export-pack', portfolioId, marketView] as const,
   },
   fund: {
     list: () => ['fund', 'list'] as const,
@@ -44,6 +47,13 @@ export const queryKeys = {
   },
   simulation: {
     presets: () => ['simulation', 'presets'] as const,
+    historicalEvents: () => ['simulation', 'historical-events'] as const,
+  },
+  backtest: {
+    defaults: () => ['backtest', 'defaults'] as const,
+  },
+  scheduler: {
+    status: () => ['scheduler', 'status'] as const,
   },
   task: {
     detail: (taskId: string | undefined) => ['task', taskId] as const,
@@ -52,6 +62,7 @@ export const queryKeys = {
   settings: {
     profile: () => ['settings', 'profile'] as const,
     preferences: () => ['settings', 'preferences'] as const,
+    enums: () => ['settings', 'enums'] as const,
   },
   exports: {
     history: () => ['exports', 'history'] as const,

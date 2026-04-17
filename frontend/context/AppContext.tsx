@@ -18,7 +18,6 @@ export type ResolvedTheme = 'dark' | 'light';
 
 export interface AppSelectionState {
   marketView: string;
-  timeWindow: string;
   portfolioId: string;
   researchMode: ResearchMode;
   theme: ThemeMode;
@@ -27,7 +26,6 @@ export interface AppSelectionState {
 interface AppContextValue extends AppSelectionState {
   resolvedTheme: ResolvedTheme;
   setMarketView: (value: string) => void;
-  setTimeWindow: (value: string) => void;
   setPortfolioId: (value: string) => void;
   setResearchMode: (value: ResearchMode) => void;
   setTheme: (value: ThemeMode) => void;
@@ -39,30 +37,23 @@ interface AppContextValue extends AppSelectionState {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
-const STORAGE_KEY = 'investment-analysis-selection-v2';
+const STORAGE_KEY = 'investment-analysis-selection-v3';
 
 const DEFAULTS: AppSelectionState = {
   marketView: 'cn_a',
-  timeWindow: '20D',
   portfolioId: 'pf_default',
   researchMode: 'research',
   theme: 'dark',
 };
 
-const URL_SYNC_KEYS: Array<keyof AppSelectionState> = [
-  'marketView',
-  'timeWindow',
-  'portfolioId',
-  'researchMode',
-];
-
 const URL_PARAM_MAP: Record<keyof AppSelectionState, string> = {
   marketView: 'market',
-  timeWindow: 'tw',
   portfolioId: 'pf',
   researchMode: 'mode',
   theme: '__theme_unused',
 };
+
+const URL_SYNC_KEYS: Array<keyof AppSelectionState> = ['marketView', 'portfolioId', 'researchMode'];
 
 const readLocalSelection = (): Partial<AppSelectionState> => {
   if (typeof window === 'undefined') return {};
@@ -96,7 +87,6 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     refetchOnWindowFocus: false,
   });
 
-  // Initial hydration from localStorage + URL.
   useEffect(() => {
     const stored = readLocalSelection();
     const queryParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
@@ -105,11 +95,9 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
 
     if (queryParams) {
       const m = queryParams.get('market');
-      const tw = queryParams.get('tw');
       const pf = queryParams.get('pf');
       const mode = queryParams.get('mode');
       if (m) next.marketView = m;
-      if (tw) next.timeWindow = tw;
       if (pf) next.portfolioId = pf;
       if (mode === 'research' || mode === 'light') next.researchMode = mode;
     }
@@ -118,21 +106,18 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     setIsHydrated(true);
   }, []);
 
-  // Apply bootstrap defaults on top of hydrated state — only fills blanks.
   useEffect(() => {
     const data = bootstrapQuery.data;
     if (!data || !isHydrated) return;
     setState((current) => {
       const markets = data.markets.map((m) => m.id);
       const portfolios = data.portfolios.map((p) => p.id);
-      const windows = data.time_windows;
       const defaults = data.default_settings;
       return {
         marketView: markets.includes(current.marketView) ? current.marketView : defaults.market_view,
-        timeWindow: windows.includes(current.timeWindow) ? current.timeWindow : defaults.time_window,
         portfolioId: portfolios.includes(current.portfolioId)
           ? current.portfolioId
-          : (portfolios[0] ?? defaults.market_view),
+          : (portfolios[0] ?? 'pf_default'),
         researchMode:
           current.researchMode === 'research' || current.researchMode === 'light'
             ? current.researchMode
@@ -142,19 +127,17 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     });
   }, [bootstrapQuery.data, isHydrated]);
 
-  // Persist to localStorage.
   useEffect(() => {
     if (!isHydrated || typeof window === 'undefined') return;
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }, [state, isHydrated]);
 
-  // Keep URL in sync for core filters so reloads / shares preserve state.
   useEffect(() => {
     if (!isHydrated || !router.isReady) return;
     const params = new URLSearchParams(
       Array.from(Object.entries(router.query)).flatMap(([k, v]) =>
-        v === undefined ? [] : [[k, Array.isArray(v) ? v[0] : String(v)]]
-      ) as Array<[string, string]>
+        v === undefined ? [] : [[k, Array.isArray(v) ? v[0] : String(v)]],
+      ) as Array<[string, string]>,
     );
     let changed = false;
     for (const key of URL_SYNC_KEYS) {
@@ -170,9 +153,8 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       const newUrl = `${router.pathname}?${params.toString()}`;
       router.replace(newUrl, undefined, { shallow: true, scroll: false });
     }
-  }, [state.marketView, state.timeWindow, state.portfolioId, state.researchMode, isHydrated, router.isReady]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [state.marketView, state.portfolioId, state.researchMode, isHydrated, router.isReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Theme resolution + DOM class + data-density attribute.
   useEffect(() => {
     if (typeof document === 'undefined') return;
     const resolved = resolveTheme(state.theme);
@@ -182,7 +164,6 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     document.documentElement.dataset.density = state.researchMode === 'research' ? 'research' : 'light';
   }, [state.theme, state.researchMode]);
 
-  // Listen to system colour-scheme changes when user picks `system`.
   useEffect(() => {
     if (state.theme !== 'system' || typeof window === 'undefined' || !window.matchMedia) return;
     const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -200,7 +181,7 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
     <K extends keyof AppSelectionState>(key: K) =>
       (value: AppSelectionState[K]) =>
         setState((prev) => (prev[key] === value ? prev : { ...prev, [key]: value })),
-    []
+    [],
   );
 
   const value = useMemo<AppContextValue>(
@@ -208,7 +189,6 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       ...state,
       resolvedTheme,
       setMarketView: setField('marketView'),
-      setTimeWindow: setField('timeWindow'),
       setPortfolioId: setField('portfolioId'),
       setResearchMode: setField('researchMode'),
       setTheme: setField('theme'),
@@ -217,7 +197,7 @@ export function AppContextProvider({ children }: { children: ReactNode }) {
       bootstrapError: bootstrapQuery.error,
       isHydrated,
     }),
-    [state, resolvedTheme, setField, bootstrapQuery.data, bootstrapQuery.isLoading, bootstrapQuery.error, isHydrated]
+    [state, resolvedTheme, setField, bootstrapQuery.data, bootstrapQuery.isLoading, bootstrapQuery.error, isHydrated],
   );
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

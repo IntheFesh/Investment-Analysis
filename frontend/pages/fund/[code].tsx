@@ -1,9 +1,14 @@
+import { useState } from 'react';
 import { useRouter } from 'next/router';
 import Link from 'next/link';
 import { Layout } from '@/components/shell/Layout';
 import { SkeletonChart } from '@/components/ui/Skeleton';
 import { ErrorState } from '@/components/ui/ErrorState';
 import { Button } from '@/components/ui/Button';
+import {
+  TimeWindowSelector,
+  MODULE_TIME_WINDOWS,
+} from '@/components/shell/TimeWindowSelector';
 import { useFundOverview, useFundAnalysis } from '@/hooks/useFund';
 import { FundSummary } from '@/components/pages/fund/FundSummary';
 import { FundAnalysisPanels } from '@/components/pages/fund/FundAnalysisPanels';
@@ -13,8 +18,9 @@ export default function FundDetailPage() {
   const rawCode = router.query.code;
   const code = typeof rawCode === 'string' ? rawCode : '';
 
-  const overview = useFundOverview(code);
-  const analysis = useFundAnalysis(code);
+  const [timeWindow, setTimeWindow] = useState<string>('20D');
+  const overview = useFundOverview(code, timeWindow);
+  const analysis = useFundAnalysis(code, timeWindow);
 
   const meta = overview.data?.meta ?? analysis.data?.meta;
 
@@ -24,9 +30,18 @@ export default function FundDetailPage() {
       subtitle={code ? `代码 ${code}` : '正在解析路由参数…'}
       meta={meta}
       actions={
-        <Link href="/fund">
-          <Button variant="ghost" size="sm">返回基金池</Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <TimeWindowSelector
+            value={timeWindow}
+            onChange={setTimeWindow}
+            options={[...MODULE_TIME_WINDOWS]}
+          />
+          <Link href="/fund">
+            <Button variant="ghost" size="sm">
+              返回基金池
+            </Button>
+          </Link>
+        </div>
       }
     >
       {!code ? (

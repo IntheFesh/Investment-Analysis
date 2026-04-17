@@ -1,27 +1,37 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Layout } from '@/components/shell/Layout';
 import { SkeletonChart } from '@/components/ui/Skeleton';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { ApiError } from '@/lib/apiTypes';
-import { useSimulationPresets, useSimulationMutation } from '@/hooks/useSimulation';
+import {
+  useSimulationPresets,
+  useSimulationMutation,
+  useHistoricalEvents,
+} from '@/hooks/useSimulation';
 import { useTaskRunner } from '@/hooks/useTaskPolling';
 import { useAppContext } from '@/context/AppContext';
-import { SimulationForm } from '@/components/pages/simulation/SimulationForm';
+import {
+  SimulationForm,
+  type SimulationMode,
+} from '@/components/pages/simulation/SimulationForm';
 import { StatisticalResult } from '@/components/pages/simulation/StatisticalResult';
 import { ScenarioResult } from '@/components/pages/simulation/ScenarioResult';
+import { HistoricalResult } from '@/components/pages/simulation/HistoricalResult';
 import type {
   SimulationResult,
   StatisticalSimulationResult,
   ScenarioSimulationResult,
+  HistoricalSimulationResult,
 } from '@/services/types';
 
 export default function SimulationPage() {
-  const { portfolioId } = useAppContext();
+  const { portfolioId, marketView } = useAppContext();
   const presetsQuery = useSimulationPresets();
+  const historicalQuery = useHistoricalEvents();
   const mutation = useSimulationMutation();
   const runner = useTaskRunner();
 
-  const [mode, setMode] = useState<'statistical' | 'scenario'>('statistical');
+  const [mode, setMode] = useState<SimulationMode>('statistical');
   const [stat, setStat] = useState({
     horizonDays: 60,
     numPaths: 500,
@@ -29,7 +39,16 @@ export default function SimulationPage() {
     bootstrap: true,
   });
   const [selectedPresets, setSelectedPresets] = useState<string[]>([]);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [useSentimentStress, setUseSentimentStress] = useState<boolean>(true);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const events = historicalQuery.data?.data;
+    if (events && events.length > 0 && !selectedEventId) {
+      setSelectedEventId(events[0].id);
+    }
+  }, [historicalQuery.data, selectedEventId]);
 
   const submit = async () => {
     setSubmitError(null);
@@ -43,6 +62,21 @@ export default function SimulationPage() {
           num_paths: stat.numPaths,
           confidence_interval: stat.confidenceInterval,
           bootstrap: stat.bootstrap,
+          market_view: marketView,
+          use_sentiment_stress: useSentimentStress,
+        });
+        runner.start(res.data.task_id);
+      } else if (mode === 'historical') {
+        if (!selectedEventId) {
+          setSubmitError('请选择一个历史事件。');
+          return;
+        }
+        const res = await mutation.mutateAsync({
+          mode: 'historical',
+          portfolio_id: portfolioId,
+          event_id: selectedEventId,
+          market_view: marketView,
+          use_sentiment_stress: useSentimentStress,
         });
         runner.start(res.data.task_id);
       } else {
@@ -54,6 +88,8 @@ export default function SimulationPage() {
           mode: 'scenario',
           portfolio_id: portfolioId,
           scenario_ids: selectedPresets,
+          market_view: marketView,
+          use_sentiment_stress: useSentimentStress,
         });
         runner.start(res.data.task_id);
       }
@@ -64,7 +100,7 @@ export default function SimulationPage() {
 
   const togglePreset = (id: string) => {
     setSelectedPresets((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   };
 
@@ -84,7 +120,7 @@ export default function SimulationPage() {
   return (
     <Layout
       title="情景模拟"
-      subtitle="统计模拟与情景回测共用一套任务管线，结果从后端结构化返回。"
+      subtitle="统计 / 历史重演 / 情景冲击 三引擎共享任务管线，可叠加当日情绪压力参数。"
       meta={presetsQuery.data?.meta}
     >
       <SimulationForm
@@ -95,6 +131,11 @@ export default function SimulationPage() {
         presets={presetsQuery.data?.data ?? []}
         selectedPresets={selectedPresets}
         onPresetToggle={togglePreset}
+        historicalEvents={historicalQuery.data?.data ?? []}
+        selectedEventId={selectedEventId}
+        onEventChange={setSelectedEventId}
+        useSentimentStress={useSentimentStress}
+        onSentimentStressChange={setUseSentimentStress}
         disabled={disableSubmit}
         onSubmit={submit}
         taskProgress={progress}
@@ -114,6 +155,10 @@ export default function SimulationPage() {
 
       {result && result.mode === 'scenario' ? (
         <ScenarioResult result={result as ScenarioSimulationResult} />
+      ) : null}
+
+      {result && result.mode === 'historical' ? (
+        <HistoricalResult result={result as HistoricalSimulationResult} />
       ) : null}
 
       {!runner.task && !mutation.isLoading ? (

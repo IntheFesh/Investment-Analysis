@@ -1,6 +1,5 @@
 import { ReactNode } from 'react';
 import { MarketSelector } from './MarketSelector';
-import { TimeWindowSelector } from './TimeWindowSelector';
 import { PortfolioSelector } from './PortfolioSelector';
 import { ResearchModeSwitch } from './ResearchModeSwitch';
 import { ThemeToggle } from './ThemeToggle';
@@ -12,7 +11,6 @@ interface TopBarProps {
   rightSlot?: ReactNode;
   showPortfolio?: boolean;
   showMarket?: boolean;
-  showTimeWindow?: boolean;
 }
 
 export function TopBar({
@@ -20,7 +18,6 @@ export function TopBar({
   rightSlot,
   showPortfolio = true,
   showMarket = true,
-  showTimeWindow = true,
 }: TopBarProps) {
   return (
     <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-border bg-surface-base/90 px-6 py-3 backdrop-blur">
@@ -29,12 +26,6 @@ export function TopBar({
           <div className="flex items-center gap-2">
             <div className="text-micro uppercase tracking-wider text-text-tertiary">市场视角</div>
             <MarketSelector />
-          </div>
-        )}
-        {showTimeWindow && (
-          <div className="flex items-center gap-2">
-            <div className="text-micro uppercase tracking-wider text-text-tertiary">观察窗口</div>
-            <TimeWindowSelector />
           </div>
         )}
         {showPortfolio && (

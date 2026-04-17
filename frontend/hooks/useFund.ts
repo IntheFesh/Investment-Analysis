@@ -9,20 +9,19 @@ export function useFundList() {
   });
 }
 
-export function useFundOverview(code: string) {
-  const { timeWindow } = useAppContext();
+export function useFundOverview(code: string, timeWindow: string = '20D') {
   return useQuery(
     queryKeys.fund.overview(code, timeWindow),
     () => fundService.getOverview(code),
-    { enabled: Boolean(code), staleTime: 60 * 1000 }
+    { enabled: Boolean(code), staleTime: 60 * 1000 },
   );
 }
 
-export function useFundAnalysis(code: string) {
-  const { portfolioId, timeWindow } = useAppContext();
+export function useFundAnalysis(code: string, timeWindow: string = '20D') {
+  const { portfolioId } = useAppContext();
   return useQuery(
     queryKeys.fund.analysis(code, portfolioId, timeWindow),
     () => fundService.getAnalysis(code, portfolioId),
-    { enabled: Boolean(code), staleTime: 60 * 1000 }
+    { enabled: Boolean(code), staleTime: 60 * 1000 },
   );
 }

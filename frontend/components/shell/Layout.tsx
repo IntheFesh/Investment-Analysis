@@ -12,7 +12,6 @@ interface LayoutProps {
   actions?: ReactNode;
   showPortfolio?: boolean;
   showMarket?: boolean;
-  showTimeWindow?: boolean;
   rightSlot?: ReactNode;
 }
 
@@ -24,7 +23,6 @@ export function Layout({
   actions,
   showPortfolio,
   showMarket,
-  showTimeWindow,
   rightSlot,
 }: LayoutProps) {
   return (
@@ -41,7 +39,6 @@ export function Layout({
             rightSlot={rightSlot}
             showPortfolio={showPortfolio}
             showMarket={showMarket}
-            showTimeWindow={showTimeWindow}
           />
           <main className="flex-1 px-6 py-5">
             {(title || subtitle || actions) && (
