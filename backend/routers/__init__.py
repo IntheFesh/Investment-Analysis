@@ -1,8 +1,18 @@
-"""Expose API routers for import in the app module."""
+"""API router package."""
 
-from . import system, market, sentiment, portfolio, fund, simulation, import_api, export_api, settings  # noqa: F401
+from . import (  # noqa: F401
+    export_api,
+    fund,
+    import_api,
+    market,
+    portfolio,
+    sentiment,
+    settings,
+    simulation,
+    system,
+    tasks,
+)
 
-# Expose names explicitly for static analysis tools
 __all__ = [
     "system",
     "market",
@@ -13,4 +23,5 @@ __all__ = [
     "import_api",
     "export_api",
     "settings",
+    "tasks",
 ]

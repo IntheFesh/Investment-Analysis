@@ -2,12 +2,140 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Design tokens — dark is the research default, light is the presentation /
+ * share variant. All colours flow through CSS variables so theme switches are
+ * single-root class toggles, and chart wrappers read the same values.
+ */
+
+:root,
+:root.dark {
+  color-scheme: dark;
+
+  --surface-base: #0a0f1c;
+  --surface-raised: #121a2b;
+  --surface-sunken: #070b15;
+  --surface-overlay: rgba(6, 10, 22, 0.78);
+
+  --border-default: #1e2a42;
+  --border-subtle: #162036;
+  --border-strong: #2c3b58;
+
+  --text-primary: #e6edf9;
+  --text-secondary: #a6b3c8;
+  --text-tertiary: #6b7a95;
+  --text-inverse: #0a0f1c;
+
+  --brand: #3278ff;
+  --brand-muted: #1b2b55;
+
+  --up: #21c88a;
+  --up-muted: #13433a;
+  --up-soft: rgba(33, 200, 138, 0.12);
+
+  --down: #ff4d6d;
+  --down-muted: #4a1a2a;
+  --down-soft: rgba(255, 77, 109, 0.12);
+
+  --neutral: #a6b3c8;
+  --neutral-muted: #1e2a42;
+  --neutral-soft: rgba(166, 179, 200, 0.1);
+
+  --warn: #f5b94a;
+  --warn-muted: #453210;
+  --warn-soft: rgba(245, 185, 74, 0.14);
+
+  --danger: #ff4d6d;
+  --danger-muted: #4a1a2a;
+  --danger-soft: rgba(255, 77, 109, 0.14);
+
+  --info: #4aa6ff;
+  --info-muted: #0f2d52;
+  --info-soft: rgba(74, 166, 255, 0.12);
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(20, 30, 50, 0.6);
+  --shadow-card-hover: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(50, 120, 255, 0.25);
+  --shadow-overlay: 0 24px 64px rgba(0, 0, 0, 0.55);
+
+  --chart-grid: #19243b;
+  --chart-axis: #3b4a6b;
+  --chart-tooltip-bg: #0f1626;
+  --chart-tooltip-border: #2c3b58;
+}
+
+:root.light {
+  color-scheme: light;
+
+  --surface-base: #f5f7fb;
+  --surface-raised: #ffffff;
+  --surface-sunken: #eef1f7;
+  --surface-overlay: rgba(255, 255, 255, 0.88);
+
+  --border-default: #dfe4ee;
+  --border-subtle: #eceff5;
+  --border-strong: #c5cddd;
+
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-tertiary: #7e8aa2;
+  --text-inverse: #ffffff;
+
+  --brand: #1757f4;
+  --brand-muted: #dce6ff;
+
+  --up: #0c9d6b;
+  --up-muted: #d0efe2;
+  --up-soft: rgba(12, 157, 107, 0.12);
+
+  --down: #d63450;
+  --down-muted: #fadbe1;
+  --down-soft: rgba(214, 52, 80, 0.12);
+
+  --neutral: #475569;
+  --neutral-muted: #e2e6ee;
+  --neutral-soft: rgba(71, 85, 105, 0.08);
+
+  --warn: #c77a0a;
+  --warn-muted: #fbebcf;
+  --warn-soft: rgba(199, 122, 10, 0.12);
+
+  --danger: #d63450;
+  --danger-muted: #fadbe1;
+  --danger-soft: rgba(214, 52, 80, 0.12);
+
+  --info: #1f72c0;
+  --info-muted: #d6e8f6;
+  --info-soft: rgba(31, 114, 192, 0.12);
+
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.06), 0 0 0 1px rgba(15, 23, 42, 0.04);
+  --shadow-card-hover: 0 12px 28px rgba(15, 23, 42, 0.12), 0 0 0 1px rgba(23, 87, 244, 0.16);
+  --shadow-overlay: 0 24px 64px rgba(15, 23, 42, 0.15);
+
+  --chart-grid: #e7ecf5;
+  --chart-axis: #9aa5bd;
+  --chart-tooltip-bg: #ffffff;
+  --chart-tooltip-border: #dfe4ee;
+}
+
 html,
 body {
   padding: 0;
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
-    Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  background: var(--surface-base);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+  font-feature-settings: 'tnum' on, 'cv11' on, 'ss01' on;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  min-height: 100vh;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 a {
@@ -15,6 +143,99 @@ a {
   text-decoration: none;
 }
 
-* {
-  box-sizing: border-box;
+a:hover {
+  color: var(--brand);
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+::selection {
+  background: var(--brand);
+  color: var(--text-inverse);
+}
+
+/* Scrollbar — unified look across platforms */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 9999px;
+  border: 2px solid var(--surface-base);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+/* Research-mode density */
+:root[data-density='research'] {
+  --space-card: 1rem;
+  --space-gutter: 1rem;
+}
+:root[data-density='light'] {
+  --space-card: 1.25rem;
+  --space-gutter: 1.5rem;
+}
+
+/* Tabular numerals for all numeric classes */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Skeleton shimmer */
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--border-subtle) 0%,
+    var(--border-default) 40%,
+    var(--border-subtle) 80%
+  );
+  background-size: 800px 100%;
+  animation: shimmer 1.6s linear infinite;
+  border-radius: 0.375rem;
+}
+
+/* Card primitive */
+.card {
+  background: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: 0.75rem;
+  box-shadow: var(--shadow-card);
+  transition: box-shadow 160ms cubic-bezier(0.2, 0, 0, 1),
+    border-color 160ms cubic-bezier(0.2, 0, 0, 1);
+}
+.card-interactive:hover {
+  box-shadow: var(--shadow-card-hover);
+  border-color: var(--border-strong);
+}
+
+/* Divider */
+.hr-soft {
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Data freshness / demo badge */
+.data-source-live {
+  color: var(--up);
+  background: var(--up-soft);
+  border: 1px solid var(--up-muted);
+}
+.data-source-demo {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-muted);
+}
+.data-source-fallback {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-muted);
 }

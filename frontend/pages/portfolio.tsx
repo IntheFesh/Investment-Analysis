@@ -1,40 +1,76 @@
-import { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import Layout from '@/components/Layout';
-import QueryErrorState from '@/components/QueryErrorState';
-import { useAppContext } from '@/context/AppContext';
-import { portfolioService } from '@/services/portfolioService';
+import { useState } from 'react';
+import { Layout } from '@/components/shell/Layout';
+import { ExportButton } from '@/components/shell/ExportButton';
+import { Tabs } from '@/components/ui/Tabs';
+import { SkeletonChart } from '@/components/ui/Skeleton';
+import { ErrorState } from '@/components/ui/ErrorState';
+import {
+  usePortfolioOverview,
+  usePortfolioDiagnosis,
+  usePortfolioExportPack,
+} from '@/hooks/usePortfolio';
+import { PortfolioOverviewTab } from '@/components/pages/portfolio/OverviewTab';
+import { PortfolioDiagnosisTab } from '@/components/pages/portfolio/DiagnosisTab';
+import { PortfolioAIExportTab } from '@/components/pages/portfolio/AIExportTab';
+
+const TABS = [
+  { id: 'overview', label: '组合穿透' },
+  { id: 'diagnosis', label: '组合诊断' },
+  { id: 'export', label: 'AI 导出包' },
+];
 
 export default function PortfolioPage() {
-  const [tab, setTab] = useState<'overview' | 'diagnosis' | 'export'>('overview');
-  const { portfolioId } = useAppContext();
+  const [tab, setTab] = useState('overview');
 
-  const overviewQuery = useQuery(['portfolio-overview', portfolioId], () => portfolioService.getOverview(portfolioId), { staleTime: 60 * 1000 });
-  const diagnosisQuery = useQuery(['portfolio-diagnosis', portfolioId], () => portfolioService.getDiagnosis(portfolioId), { staleTime: 60 * 1000 });
-  const exportQuery = useQuery(['portfolio-export-pack', portfolioId], () => portfolioService.getExportPack(portfolioId), { staleTime: 2 * 60 * 1000 });
+  const overview = usePortfolioOverview();
+  const diagnosis = usePortfolioDiagnosis();
+  const exportPack = usePortfolioExportPack();
 
-  const markdownPreview = useMemo(
-    () => (exportQuery.data as any)?.formats?.markdown?.split('\n').slice(0, 8).join('\n') ?? '',
-    [exportQuery.data]
-  );
+  const activeQuery =
+    tab === 'overview' ? overview : tab === 'diagnosis' ? diagnosis : exportPack;
+  const meta = activeQuery.data?.meta ?? overview.data?.meta;
 
   return (
-    <Layout>
-      <h1 className="text-2xl font-bold mb-4">基金组合</h1>
-      <div className="flex space-x-4 mb-4 border-b border-gray-200 dark:border-gray-700">
-        {['overview', 'diagnosis', 'export'].map((name) => (
-          <button
-            key={name}
-            className={`px-3 py-2 text-sm font-medium ${tab === name ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-600 dark:text-gray-400'}`}
-            onClick={() => setTab(name as any)}
-          >
-            {name === 'overview' ? '组合看穿' : name === 'diagnosis' ? '组合诊断' : 'AI 导出'}
-          </button>
-        ))}
-      </div>
-      {tab === 'overview' && (overviewQuery.isLoading ? <p>加载中…</p> : overviewQuery.error ? <QueryErrorState error={overviewQuery.error} /> : <pre className="text-xs">{JSON.stringify(overviewQuery.data, null, 2)}</pre>)}
-      {tab === 'diagnosis' && (diagnosisQuery.isLoading ? <p>加载中…</p> : diagnosisQuery.error ? <QueryErrorState error={diagnosisQuery.error} /> : <pre className="text-xs">{JSON.stringify(diagnosisQuery.data, null, 2)}</pre>)}
-      {tab === 'export' && (exportQuery.isLoading ? <p>加载中…</p> : exportQuery.error ? <QueryErrorState error={exportQuery.error} /> : <pre className="text-xs">{markdownPreview}</pre>)}
+    <Layout
+      title="基金组合"
+      subtitle="穿透单持仓、结构性诊断、AI 导出包——三视图一套组合数据。"
+      meta={meta}
+      actions={<ExportButton page="portfolio" portfolioId={overview.data?.data.portfolio_id ?? null} />}
+    >
+      <Tabs value={tab} onChange={setTab} items={TABS} />
+
+      {tab === 'overview' && (
+        overview.isLoading && !overview.data ? (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <SkeletonChart />
+            <SkeletonChart />
+          </div>
+        ) : overview.error ? (
+          <ErrorState error={overview.error} onRetry={() => overview.refetch()} />
+        ) : overview.data ? (
+          <PortfolioOverviewTab data={overview.data.data} />
+        ) : null
+      )}
+
+      {tab === 'diagnosis' && (
+        diagnosis.isLoading && !diagnosis.data ? (
+          <SkeletonChart />
+        ) : diagnosis.error ? (
+          <ErrorState error={diagnosis.error} onRetry={() => diagnosis.refetch()} />
+        ) : diagnosis.data ? (
+          <PortfolioDiagnosisTab data={diagnosis.data.data} />
+        ) : null
+      )}
+
+      {tab === 'export' && (
+        exportPack.isLoading && !exportPack.data ? (
+          <SkeletonChart />
+        ) : exportPack.error ? (
+          <ErrorState error={exportPack.error} onRetry={() => exportPack.refetch()} />
+        ) : exportPack.data ? (
+          <PortfolioAIExportTab data={exportPack.data.data} />
+        ) : null
+      )}
     </Layout>
   );
 }
