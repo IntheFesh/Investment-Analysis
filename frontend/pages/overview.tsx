@@ -11,7 +11,7 @@ import { SectorRotationPanel } from '@/components/pages/overview/SectorRotationP
 import { FundFlowsPanel } from '@/components/pages/overview/FundFlowsPanel';
 import { BreadthPanel } from '@/components/pages/overview/BreadthPanel';
 import { ExplanationsPanel } from '@/components/pages/overview/ExplanationsPanel';
-import { EvidencePanel, type Evidence } from '@/components/ui/EvidencePanel';
+import { ConclusionTracePanel } from '@/components/pages/overview/ConclusionTracePanel';
 import { SkeletonChart } from '@/components/ui/Skeleton';
 import { ErrorState } from '@/components/ui/ErrorState';
 import { useAppContext } from '@/context/AppContext';
@@ -22,10 +22,6 @@ export default function OverviewPage() {
   const { data, isLoading, error, refetch } = useMarketOverview(timeWindow);
   const meta = data?.meta;
   const overview = data?.data;
-
-  const evidences: Evidence[] = (overview?.explanations ?? [])
-    .map((e) => e.evidence)
-    .filter((e): e is Evidence => !!e && typeof e === 'object');
 
   const showDetailedPanels = researchMode !== 'light';
 
@@ -56,7 +52,7 @@ export default function OverviewPage() {
         <ErrorState error={error} onRetry={() => refetch()} />
       ) : overview ? (
         <>
-          <IndicesPanel indices={overview.indices} />
+          <IndicesPanel indices={overview.indices} topMetrics={overview.top_metrics} />
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <SectorRotationPanel data={overview.signals.sector_rotation} />
             {showDetailedPanels ? (
@@ -70,12 +66,8 @@ export default function OverviewPage() {
               summary={overview.summary}
             />
           </div>
-          {showDetailedPanels && evidences.length > 0 ? (
-            <EvidencePanel
-              title="今日结论追溯"
-              subtitle={`${evidences.length} 条解读级证据 · 方法版本、指标、失效条件均可追溯`}
-              evidences={evidences}
-            />
+          {showDetailedPanels && overview.explanations.length > 0 ? (
+            <ConclusionTracePanel explanations={overview.explanations} />
           ) : null}
         </>
       ) : null}

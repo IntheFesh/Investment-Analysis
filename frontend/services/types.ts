@@ -1,25 +1,62 @@
 /** Shared response types used across multiple services. */
 
+export type DataQualityTier =
+  | 'production_authorized'
+  | 'production_delayed'
+  | 'research_only'
+  | 'derived'
+  | 'fallback_demo';
+
 export interface IndexRow {
   symbol: string;
+  code?: string;
   name: string;
   last: number;
   change: number;
   change_percent: number;
   turnover: number;
   trend: number[];
+  support?: number;
+  resistance?: number;
+  valuation?: {
+    pe_percentile?: number;
+    pb_percentile?: number;
+  };
+  contributors?: Array<{ name: string; value: number }>;
+  basis?: {
+    name: string;
+    value: number;
+  };
+  leaders?: Array<{ name: string; change_percent: number }>;
   as_of: string;
+  role?: 'headline' | 'support';
+  data_quality?: {
+    tier: DataQualityTier;
+    label: string;
+    delay_seconds?: number;
+  };
 }
 
 export interface SectorItem {
   sector: string;
   score: number;
+  rank?: number;
+  tag?: string;
   note?: string;
+  metrics?: {
+    relative_strength?: number;
+    rolling_momentum?: number;
+    turnover_surge?: number;
+    breadth_ratio?: number;
+    crowding?: number;
+    vol_adjusted_return?: number;
+  };
 }
 
 export interface FlowItem {
   sector: string;
   value: number;
+  strength?: number;
   note?: string;
 }
 
@@ -27,30 +64,45 @@ export interface SectorRotation {
   strongest: SectorItem[];
   candidate: SectorItem[];
   high_crowding: SectorItem[];
+  ranked?: SectorItem[];
 }
 
 export interface FundFlows {
   top_inflows: FlowItem[];
   top_outflows: FlowItem[];
   view: string;
+  label?: string;
+  disclaimer?: string;
+  universe_turnover_momentum?: number;
 }
 
 export interface BreadthStats {
+  coverage: number;
   advancers_ratio: number;
+  decliners_ratio: number;
+  above_ma20_ratio: number;
+  above_ma60_ratio: number;
+  new_high_ratio: number;
+  new_low_ratio: number;
   limit_up: number;
   limit_down: number;
-  turnover_change: number;
+  hotspot_concentration: number;
   market_heat: number;
+  diffusion: number;
 }
 
 import type { Evidence } from '@/components/ui/EvidencePanel';
 
 export interface Explanation {
   id: string;
+  title?: string;
   fact: string;
   inference: string;
   risk: string;
-  evidence: Evidence;
+  timestamp?: string;
+  horizon?: string;
+  drivers?: Array<{ label: string; value: string }>;
+  evidence?: Evidence;
   tag: string;
 }
 
@@ -58,10 +110,31 @@ export interface MarketOverview {
   market_view: string;
   time_window: string;
   indices: IndexRow[];
+  top_metrics?: Array<{ label: string; value: number; unit?: string; tone?: 'up' | 'down' | 'neutral' }>;
   signals: {
     sector_rotation: SectorRotation;
     fund_flows: FundFlows;
     breadth: BreadthStats;
+    cross_asset?: Array<{
+      symbol: string;
+      name: string;
+      last: number;
+      window_return: number;
+      lead_signal?: string;
+      as_of?: string;
+    }>;
+    regime?: {
+      label: string;
+      probability: number;
+      duration_days: number;
+      switch_risk: number;
+    };
+    anomalies?: Array<{
+      id: string;
+      label: string;
+      level: 'low' | 'medium' | 'high';
+      detail: string;
+    }>;
   };
   explanations: Explanation[];
   summary: string;
