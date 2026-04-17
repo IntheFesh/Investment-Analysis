@@ -11,7 +11,7 @@ import { SectorRotationPanel } from '@/components/pages/overview/SectorRotationP
 import { FundFlowsPanel } from '@/components/pages/overview/FundFlowsPanel';
 import { BreadthPanel } from '@/components/pages/overview/BreadthPanel';
 import { ExplanationsPanel } from '@/components/pages/overview/ExplanationsPanel';
-import { ConclusionTracePanel } from '@/components/pages/overview/ConclusionTracePanel';
+import { NewsPanel } from '@/components/pages/overview/NewsPanel';
 import { SkeletonChart } from '@/components/ui/Skeleton';
 import { ErrorState } from '@/components/ui/ErrorState';
 import { useAppContext } from '@/context/AppContext';
@@ -48,7 +48,7 @@ export default function OverviewPage() {
           <SkeletonChart />
           <SkeletonChart />
         </div>
-      ) : error ? (
+      ) : error && !overview ? (
         <ErrorState error={error} onRetry={() => refetch()} />
       ) : overview ? (
         <>
@@ -66,8 +66,11 @@ export default function OverviewPage() {
               summary={overview.summary}
             />
           </div>
-          {showDetailedPanels && overview.explanations.length > 0 ? (
-            <ConclusionTracePanel explanations={overview.explanations} />
+          {showDetailedPanels ? (
+            <NewsPanel
+              domestic={overview.news?.domestic ?? []}
+              international={overview.news?.international ?? []}
+            />
           ) : null}
         </>
       ) : null}

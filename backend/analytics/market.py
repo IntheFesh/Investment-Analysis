@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from typing import Any, Dict, List, Tuple
+import urllib.parse
+import urllib.request
 
 import numpy as np
 import pandas as pd
@@ -14,6 +17,63 @@ from ..core.universe import SectorBasket, UniverseConfig, get_universe, name_of,
 
 
 METHOD_VERSION = "mkt.v3"
+_NEWS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+
+def _fetch_news(market_view: str) -> Dict[str, Any]:
+    now_ts = datetime.now(timezone.utc).timestamp()
+    cached = _NEWS_CACHE.get(market_view)
+    if cached and (now_ts - cached[0]) <= 300:
+        return cached[1]
+
+    topics = {
+        "cn_a": ("A股 上证 深证 宏观政策", "global markets fed nasdaq bond"),
+        "hk": ("港股 恒生 科技指数 南向资金", "global markets fed nasdaq bond"),
+        "global": ("中国经济 A股 港股", "global markets fed nasdaq bond oil dollar"),
+    }
+    cn_q, glb_q = topics.get(market_view, topics["cn_a"])
+
+    def _query(q: str, count: int = 5) -> List[Dict[str, Any]]:
+        url = "https://query1.finance.yahoo.com/v1/finance/search?" + urllib.parse.urlencode({"q": q, "newsCount": count})
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        payload = None
+        last_exc: Exception | None = None
+        for _attempt in range(2):
+            try:
+                with urllib.request.urlopen(req, timeout=2.8) as resp:  # nosec B310
+                    payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        if payload is None:
+            raise RuntimeError(f"yahoo_news_failed: {last_exc}")
+        rows = payload.get("news") or []
+        out: List[Dict[str, Any]] = []
+        for item in rows:
+            provider = item.get("publisher") or ""
+            ts = item.get("providerPublishTime")
+            try:
+                ts_str = datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+            except Exception:  # noqa: BLE001
+                ts_str = ""
+            out.append(
+                {
+                    "title": str(item.get("title") or "").strip(),
+                    "source": str(provider).strip(),
+                    "url": str(item.get("link") or "").strip(),
+                    "published_at": ts_str,
+                }
+            )
+        return [x for x in out if x["title"] and x["url"]][:count]
+
+    try:
+        news = {"domestic": _query(cn_q), "international": _query(glb_q)}
+        _NEWS_CACHE[market_view] = (now_ts, news)
+        return news
+    except Exception:  # noqa: BLE001
+        if cached:
+            return cached[1]
+        return {"domestic": [], "international": []}
 
 
 def _window(time_window: str) -> int:
@@ -139,6 +199,8 @@ def _breadth(universe: UniverseConfig, data: Dict[str, pd.DataFrame], window: in
             "hotspot_concentration": 0.0,
             "market_heat": 0.0,
             "diffusion": 0.0,
+            "advance_decline_ratio": 0.0,
+            "trend_participation": 0.0,
         }
 
     adv, total_days = 0, 0
@@ -199,6 +261,8 @@ def _breadth(universe: UniverseConfig, data: Dict[str, pd.DataFrame], window: in
         "hotspot_concentration": round(float(hotspot), 3),
         "market_heat": round(float(market_heat), 3),
         "diffusion": round(float(diffusion), 3),
+        "advance_decline_ratio": round(float(adv_ratio / max(0.01, dec_ratio)), 3),
+        "trend_participation": round(float((above20 / coverage) * 0.6 + (above60 / coverage) * 0.4), 3),
     }
 
 
@@ -223,7 +287,7 @@ def _liquidity_preference(sector_scored: List[Dict[str, Any]]) -> Dict[str, Any]
     tail = [_as_item(x) for x in ranked[-5:]]
     return {
         "label": "流动性偏好强度",
-        "disclaimer": "基于成交活跃度与收益动量的研究指标，非交易所席位级资金净流。",
+        "disclaimer": "基于成交活跃度与收益动量的研究指标（研究用途，存在延迟）。",
         "top_inflows": top,
         "top_outflows": list(reversed(tail)),
         "universe_turnover_momentum": round(float(np.mean([x["value"] for x in top])) if top else 0.0, 3),
@@ -441,17 +505,9 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
                     "pe_percentile": round(_rolling_rank(close.pct_change().rolling(20).mean().dropna()) * 100, 1),
                     "pb_percentile": round(_rolling_rank(close.pct_change().rolling(60).mean().dropna()) * 100, 1),
                 },
-                "contributors": [
-                    {"name": "权重蓝筹", "value": round(max(-1.0, min(1.0, change_pct / 3)), 2)},
-                    {"name": "成长风格", "value": round(max(-1.0, min(1.0, change_pct / 4)), 2)},
-                    {"name": "防御风格", "value": round(max(-1.0, min(1.0, -change_pct / 5)), 2)},
-                ],
-                "basis": {"name": "期现基差(代理)", "value": round(change_pct * 0.18, 2)},
-                "leaders": [
-                    {"name": "领涨成分A", "change_percent": round(change_pct * 1.35, 2)},
-                    {"name": "领涨成分B", "change_percent": round(change_pct * 1.08, 2)},
-                    {"name": "领跌成分C", "change_percent": round(change_pct * -0.75, 2)},
-                ],
+                "contributors": [],
+                "basis": {"name": "数据状态", "value": 0.0},
+                "leaders": [],
                 "as_of": df.index[-1].strftime("%Y-%m-%d %H:%M"),
                 "role": "headline" if symbol in universe.headline_indices else "support",
                 "data_quality": {
@@ -501,7 +557,7 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
         {"label": "上涨家数占比", "value": breadth["advancers_ratio"], "unit": "%", "tone": "up" if breadth["advancers_ratio"] >= 0.5 else "down"},
         {"label": "市场广度ADR", "value": breadth["advancers_ratio"] / max(0.05, breadth["decliners_ratio"]), "unit": "", "tone": "neutral"},
         {"label": "波动热度", "value": breadth["market_heat"], "unit": "%", "tone": "neutral"},
-        {"label": "流动性偏好", "value": liquidity.get("universe_turnover_momentum", 0.0), "unit": "", "tone": "up" if liquidity.get("universe_turnover_momentum", 0.0) > 0 else "down"},
+        {"label": "流动性偏好", "value": liquidity.get("universe_turnover_momentum", 0.0), "unit": "", "tone": "down" if liquidity.get("universe_turnover_momentum", 0.0) > 0 else "up"},
     ]
 
     summary = f"{universe.label}处于{regime['label']}状态（概率{regime['probability']*100:.0f}%）；广度上涨占比{breadth['advancers_ratio']*100:.1f}%，热点集中度{breadth['hotspot_concentration']*100:.1f}%。"
@@ -545,6 +601,7 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
             "anomalies": anomalies,
         },
         "explanations": explanations,
+        "news": _fetch_news(market_view),
         "summary": summary,
     }
 

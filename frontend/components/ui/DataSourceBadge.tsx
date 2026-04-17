@@ -12,6 +12,8 @@ const SOURCE_LABEL: Record<string, string> = {
   'demo-snapshot': '演示快照',
   'yfinance-research': 'Yahoo 研究接口',
   'yfinance-research-degraded': 'Yahoo 研究（降级）',
+  'hybrid-research': '研究级行情源',
+  'hybrid-research-degraded': '研究级行情源（降级）',
   akshare: 'AkShare 研究接口',
   tushare: 'Tushare 研究接口',
 };

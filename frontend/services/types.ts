@@ -89,6 +89,15 @@ export interface BreadthStats {
   hotspot_concentration: number;
   market_heat: number;
   diffusion: number;
+  advance_decline_ratio?: number;
+  trend_participation?: number;
+}
+
+export interface NewsItem {
+  title: string;
+  source: string;
+  url: string;
+  published_at: string;
 }
 
 import type { Evidence } from '@/components/ui/EvidencePanel';
@@ -137,6 +146,10 @@ export interface MarketOverview {
     }>;
   };
   explanations: Explanation[];
+  news?: {
+    domestic: NewsItem[];
+    international: NewsItem[];
+  };
   summary: string;
 }
 
