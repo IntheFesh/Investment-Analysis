@@ -103,8 +103,14 @@ class ResearchRateLimiter:
     causes the pipeline-wide timeouts logged in production."""
 
     _DEFAULTS: Dict[str, float] = {
-        "yahoo": float(os.getenv("YAHOO_RATE_LIMIT_SECONDS", "3.0")),
+        # Yahoo is the tightest so we default lower than before — with
+        # Eastmoney/Tencent handling the bulk of the load, the fallback
+        # Yahoo path only needs to cover a handful of residual macro
+        # tickers and no longer needs a 3s wall that starves the refresh
+        # cycle.
+        "yahoo": float(os.getenv("YAHOO_RATE_LIMIT_SECONDS", "1.2")),
         "eastmoney": float(os.getenv("EASTMONEY_RATE_LIMIT_SECONDS", "0.25")),
+        "tencent": float(os.getenv("TENCENT_RATE_LIMIT_SECONDS", "0.35")),
         "sina": float(os.getenv("SINA_RATE_LIMIT_SECONDS", "0.5")),
     }
 
@@ -539,6 +545,27 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
 
     _EM_TIMEOUT = float(os.getenv("EASTMONEY_TIMEOUT_SECONDS", "3.0"))
 
+    # Tencent kline endpoint — used as a fallback when Eastmoney returns an
+    # empty payload (observed on some Windows/DNS setups). Returns the same
+    # shape after parsing, backed by Tencent's free research feed.
+    _TX_SECID: Dict[str, str] = {
+        "000001.SS": "sh000001",
+        "000300.SS": "sh000300",
+        "000905.SS": "sh000905",
+        "000852.SS": "sh000852",
+        "000688.SS": "sh000688",
+        "399001.SZ": "sz399001",
+        "399006.SZ": "sz399006",
+        "HSI":    "hkHSI",
+        "HSTECH": "hkHSTECH",
+        "HSCEI": "hkHSCEI",
+        "SPX": "usINX",
+        "NDX": "usIXIC",
+        "VIX": "usVIX",
+        "DXY": "usDXY",
+    }
+    _TX_TIMEOUT = float(os.getenv("TENCENT_TIMEOUT_SECONDS", "3.0"))
+
     @staticmethod
     def _parse_em_date(raw: str) -> Optional[datetime]:
         """Parse Eastmoney kline date strictly. Returns None when unparseable
@@ -581,17 +608,27 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
             if cached and (now - cached[0]) <= self._cache_ttl:
                 return cached[1].copy()
 
+        # Eastmoney requires ``ut`` (public token) and explicit ``beg``/``end``
+        # for index klines; without those it returns ``{"data":{"klines":[]}}``
+        # which manifests as the empty-payload log reported in production.
         query = urllib.parse.urlencode({
             "secid": secid,
+            "ut": "fa5fd1943c7b386f172d6893dbfba10b",
             "fields1": "f1,f2,f3,f4,f5,f6",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
             "klt": "101",
-            "fqt": "0",
+            "fqt": "1",
+            "beg": "0",
+            "end": "20500101",
             "lmt": "520",
+            "rtntype": "6",
         })
         req = urllib.request.Request(
             f"https://push2his.eastmoney.com/api/qt/stock/kline/get?{query}",
-            headers={"User-Agent": "Mozilla/5.0"},
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://quote.eastmoney.com/",
+            },
         )
         research_limiter().wait("eastmoney")
         raw = ""
@@ -671,11 +708,107 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
             self._cache[key] = (now, df.copy())
         return df
 
+    def _tencent_kline(self, symbol: str) -> pd.DataFrame:
+        """Tencent public kline — A股/港股/美股/指数 covered.
+
+        Endpoint: ``http://web.ifzq.gtimg.cn/appstock/app/fqkline/get``.
+        Response shape: ``{data: {<tx_code>: {day: [[date, open, close, high, low, volume], ...]}}}``.
+        Used as a secondary fallback when Eastmoney returns an empty payload.
+        """
+        tx_code = self._TX_SECID.get(symbol)
+        if not tx_code:
+            return pd.DataFrame()
+        key = f"tx:{symbol}"
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._cache.get(key)
+            if cached and (now - cached[0]) <= self._cache_ttl:
+                return cached[1].copy()
+
+        query = urllib.parse.urlencode({
+            "_var": "",
+            "param": f"{tx_code},day,,,520,qfq",
+        })
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?{query}"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Referer": "https://gu.qq.com/",
+            },
+        )
+        research_limiter().wait("tencent")
+        raw = ""
+        try:
+            with urllib.request.urlopen(req, timeout=self._TX_TIMEOUT) as resp:  # nosec B310
+                raw = resp.read().decode("utf-8", errors="ignore")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("tencent network fail for %s: %s", symbol, exc)
+            return pd.DataFrame()
+
+        # Tencent endpoint responds with either plain JSON or ``<var>=<json>;``
+        import json as _json
+        body = raw.strip()
+        if body.startswith("v_") or "=" in body[:40]:
+            eq = body.find("=")
+            body = body[eq + 1:].rstrip(";")
+        try:
+            payload = _json.loads(body)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("tencent json decode failed for %s: %s", symbol, exc)
+            return pd.DataFrame()
+
+        data_node = (payload.get("data") or {}).get(tx_code) or {}
+        bars = data_node.get("day") or data_node.get("qfqday") or []
+        if not bars:
+            logger.info("tencent empty payload for %s (%s)", symbol, tx_code)
+            return pd.DataFrame()
+
+        rows = []
+        for bar in bars:
+            if not bar or len(bar) < 5:
+                continue
+            dt_obj = self._parse_em_date(str(bar[0]))
+            if dt_obj is None:
+                continue
+            try:
+                open_ = float(bar[1])
+                close = float(bar[2])
+                high = float(bar[3])
+                low = float(bar[4])
+                vol = float(bar[5]) if len(bar) > 5 else 0.0
+            except (TypeError, ValueError):
+                continue
+            rows.append({
+                "Date": dt_obj,
+                "Open": open_,
+                "High": high,
+                "Low": low,
+                "Close": close,
+                "Adj Close": close,
+                "Volume": max(vol, 0.0),
+            })
+        if not rows:
+            return pd.DataFrame()
+        try:
+            df = pd.DataFrame(rows)
+            df["Date"] = pd.DatetimeIndex(df["Date"])
+            df = df.set_index("Date").sort_index()
+            df.index.name = "Date"
+        except Exception as exc:  # noqa: BLE001
+            logger.info("tencent frame build failed for %s: %s", symbol, exc)
+            return pd.DataFrame()
+
+        with self._cache_lock:
+            self._cache[key] = (now, df.copy())
+        return df
+
     def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
         wanted = symbols or list(required_symbols_for("cn_a"))
         out: Dict[str, pd.DataFrame] = {}
         remain: List[str] = []
         for symbol in wanted:
+            # First: Eastmoney
             if symbol in self._EM_SECID:
                 try:
                     df = self._eastmoney_kline(symbol)
@@ -684,8 +817,18 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
                         continue
                 except Exception as exc:  # noqa: BLE001
                     logger.info("eastmoney unexpected error for %s: %s", symbol, exc)
+            # Second: Tencent (handles empty-payload case for A/HK/US indices)
+            if symbol in self._TX_SECID:
+                try:
+                    df = self._tencent_kline(symbol)
+                    if not df.empty:
+                        out[symbol] = df
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("tencent unexpected error for %s: %s", symbol, exc)
             remain.append(symbol)
 
+        # Third: Yahoo for residual symbols (macro/forex rarely available elsewhere)
         yf_pairs = [(logical, self._YF_SYMBOL_MAP.get(logical, "")) for logical in remain]
         yf_data = self._download_yf([(l, y) for l, y in yf_pairs if y])
         for k, v in yf_data.items():

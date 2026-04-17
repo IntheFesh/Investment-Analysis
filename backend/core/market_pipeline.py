@@ -43,7 +43,12 @@ logger = logging.getLogger(__name__)
 VIEWS = ("cn_a", "hk", "global")
 WINDOWS = ("5D", "20D", "60D", "120D", "YTD", "1Y")
 
-_REFRESH_TIMEOUT = float(os.getenv("MARKET_REFRESH_TIMEOUT_SECONDS", "12"))
+_REFRESH_TIMEOUT = float(os.getenv("MARKET_REFRESH_TIMEOUT_SECONDS", "6"))
+# Prioritise the default view/window during initial warmup so the very first
+# user click resolves from a real (not seeded) snapshot. The remainder is
+# filled in the next ``_loop_task`` cycle.
+_PRIORITY_VIEW = os.getenv("MARKET_PRIORITY_VIEW", "cn_a")
+_PRIORITY_WINDOW = os.getenv("MARKET_PRIORITY_WINDOW", "20D")
 
 
 @dataclass
@@ -243,10 +248,36 @@ class MarketSnapshotPipeline:
                     logger.info("seed snapshot skipped for %s/%s: %s", view, window, exc)
 
     async def _initial_warmup(self) -> None:
+        """Warm up in priority order: default (view, window) first, then the
+        rest. This avoids the 18-job thundering herd that starves the event
+        loop during the first ~30s of uptime and lets the user's first click
+        land on a real refreshed snapshot even before the full cycle finishes.
+        """
+        adapter_name = get_data_source().name
         try:
-            await self.refresh_all()
+            await self._refresh_one(adapter_name, _PRIORITY_VIEW, _PRIORITY_WINDOW)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("initial warmup failed: %s", exc)
+            logger.warning("priority warmup failed for %s/%s: %s", _PRIORITY_VIEW, _PRIORITY_WINDOW, exc)
+        # Run the rest in groups of 4 so we never exceed semaphore concurrency
+        # by a large margin — that keeps per-job elapsed close to the expected
+        # ~2s (eastmoney + tencent fast path) rather than piling up against
+        # the yahoo rate limiter.
+        rest = [
+            (v, w)
+            for v in VIEWS
+            for w in WINDOWS
+            if not (v == _PRIORITY_VIEW and w == _PRIORITY_WINDOW)
+        ]
+        batch = 4
+        for i in range(0, len(rest), batch):
+            group = rest[i : i + batch]
+            try:
+                await asyncio.gather(
+                    *(self._refresh_one(adapter_name, v, w) for v, w in group),
+                    return_exceptions=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("warmup batch %d failed: %s", i // batch, exc)
 
     async def _loop_task(self) -> None:
         # First cycle: wait a bit to let warmup make progress
