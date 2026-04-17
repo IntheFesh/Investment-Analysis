@@ -8,6 +8,11 @@ Two tiers:
 Both tiers keep the last successful value. If a ``rebuild()`` call fails,
 the store returns the stale value stamped with ``fallback_reason`` so the
 frontend can show "缓存" instead of an empty page.
+
+The cache also supports stale-while-revalidate: ``get_fresh_or_stale``
+returns ``(value, meta, is_stale)`` without blocking on a rebuild when a
+stale entry exists — callers (typically the async refresher) are
+responsible for the rebuild side-channel.
 """
 
 from __future__ import annotations
@@ -35,6 +40,24 @@ class SnapshotCache:
         self._entries: Dict[str, CacheEntry] = {}
         self._lock = threading.Lock()
         self._ttl = default_ttl
+
+    def peek(self, key: str) -> Optional[Tuple[Any, Dict[str, Any], float]]:
+        """Return ``(value, meta, age_seconds)`` without triggering a rebuild.
+
+        Returns ``None`` if no entry is present.
+        """
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            age = time.monotonic() - entry.computed_at
+            return entry.value, dict(entry.meta), age
+
+    def put(self, key: str, value: Any, meta: Dict[str, Any]) -> None:
+        with self._lock:
+            self._entries[key] = CacheEntry(
+                value=value, meta=dict(meta), computed_at=time.monotonic(), is_stale=False
+            )
 
     def get(
         self,
@@ -71,6 +94,27 @@ class SnapshotCache:
                 stale_meta["is_realtime"] = False
                 return entry.value, stale_meta, True
             raise
+
+    def get_fresh_or_stale(
+        self,
+        key: str,
+        *,
+        ttl: Optional[float] = None,
+    ) -> Optional[Tuple[Any, Dict[str, Any], bool]]:
+        """Non-blocking read.
+
+        Returns ``(value, meta, is_stale)`` or ``None`` if no entry exists.
+        A caller (typically an async refresher) is expected to rebuild the
+        entry out-of-band when ``is_stale`` is True.
+        """
+        ttl_s = ttl if ttl is not None else self._ttl
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            age = time.monotonic() - entry.computed_at
+            is_stale = age > ttl_s or entry.is_stale
+            return entry.value, dict(entry.meta), is_stale
 
     def invalidate(self, key: str) -> None:
         with self._lock:

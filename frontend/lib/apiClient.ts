@@ -1,16 +1,25 @@
-import axios, { AxiosError } from 'axios';
+import axios, { AxiosError, AxiosRequestConfig } from 'axios';
 import { ApiEnvelope, ApiError, ApiMeta, isApiEnvelope } from './apiTypes';
 
 const apiBaseUrl =
   process.env.NEXT_PUBLIC_API_BASE_URL?.trim() || 'http://127.0.0.1:8000';
 
+// Default timeout is tight: the backend serves market endpoints from a
+// pre-warmed snapshot cache with a 3 s request-side deadline, so any
+// HTTP call that goes beyond ~8 s is hung upstream and should be cut.
+const DEFAULT_TIMEOUT_MS = 8000;
+
 export const apiClient = axios.create({
   baseURL: apiBaseUrl,
-  timeout: 15000,
+  timeout: DEFAULT_TIMEOUT_MS,
 });
 
 const parseAxiosError = (error: AxiosError): ApiError => {
-  if (error.code === 'ECONNABORTED') {
+  if (error.code === 'ERR_CANCELED' || error.code === 'ECONNABORTED') {
+    // Aborted by the caller (view switch / unmount) vs. actual timeout.
+    if (error.message?.toLowerCase().includes('canceled')) {
+      return new ApiError('TIMEOUT', '请求被取消', undefined);
+    }
     return new ApiError('TIMEOUT', '请求超时，请检查网络或稍后重试');
   }
 
@@ -76,5 +85,19 @@ apiClient.interceptors.response.use(
     return Promise.reject(new ApiError('UNKNOWN', '未知错误'));
   }
 );
+
+/** Build a request config that pipes a ``signal`` through so React Query
+ *  can abort an in-flight request when the user switches market view /
+ *  time window / navigates away. A per-call ``timeout`` override is also
+ *  supported for endpoints that are known to be cache-fast. */
+export const withRequestConfig = (
+  options: { signal?: AbortSignal; timeout?: number; params?: Record<string, unknown> } = {},
+): AxiosRequestConfig => {
+  const config: AxiosRequestConfig = {};
+  if (options.signal) config.signal = options.signal;
+  if (options.timeout !== undefined) config.timeout = options.timeout;
+  if (options.params) config.params = options.params;
+  return config;
+};
 
 export { apiBaseUrl };

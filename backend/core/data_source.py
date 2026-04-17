@@ -91,19 +91,43 @@ class SourceMeta:
 
 
 class ResearchRateLimiter:
+    """Non-blocking rate limiter.
+
+    The old implementation ``time.sleep``-ed inside the request thread,
+    which compounded with the FastAPI async handlers to yield 10s+ stalls
+    whenever more than one market snapshot was warming up.
+
+    The new implementation is token-bucket-ish: ``try_acquire`` returns
+    True if the vendor slot is free, False otherwise. Callers are expected
+    to serve cached data and let the background refresher retry later.
+    """
+
     def __init__(self, min_interval_seconds: int = 10) -> None:
         self._last: Dict[str, float] = {}
         self._lock = threading.Lock()
         self._interval = min_interval_seconds
 
-    def wait(self, vendor: str) -> float:
-        """Block until the vendor is again callable; return waited seconds."""
+    def try_acquire(self, vendor: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            last = self._last.get(vendor, 0.0)
+            if now - last < self._interval:
+                return False
+            self._last[vendor] = now
+        return True
+
+    def wait(self, vendor: str, max_wait: float = 0.0) -> float:
+        """Legacy helper — now caps the wait so async callers don't hang.
+
+        Returns actually waited seconds (0.0 if slot was already free or
+        cap was hit).
+        """
         with self._lock:
             last = self._last.get(vendor, 0.0)
             elapsed = time.monotonic() - last
-            sleep_for = max(0.0, self._interval - elapsed)
-            # mark slot in advance so concurrent callers still serialise
-            self._last[vendor] = last + sleep_for if sleep_for > 0 else time.monotonic()
+            remaining = max(0.0, self._interval - elapsed)
+            sleep_for = min(remaining, max_wait)
+            self._last[vendor] = time.monotonic() + sleep_for
         if sleep_for > 0:
             time.sleep(sleep_for)
         return sleep_for
@@ -293,11 +317,71 @@ class DemoSnapshotAdapter(DataSourceAdapter):
 # ---------------------------------------------------------------------------
 
 
+_YF_PRIMARY_MAP: Dict[str, str] = {
+    "000001.SS": "000001.SS",
+    "399001.SZ": "399001.SZ",
+    "399006.SZ": "399006.SZ",
+    "000300.SS": "000300.SS",
+    "000852.SS": "000852.SS",
+    "000905.SS": "000905.SS",
+    "000688.SS": "000688.SS",
+    "HSI": "^HSI",
+    "HSTECH": "^HSTECH",
+    "HSCEI": "^HSCE",
+    "NDX": "^NDX",
+    "SPX": "^GSPC",
+    "VIX": "^VIX",
+}
+
+# Secondary tickers tried when the primary 404s (Yahoo regularly moves
+# Hang Seng indices around and some mirrors are more reliable than
+# others). Order matters.
+_YF_FALLBACK_MAP: Dict[str, List[str]] = {
+    "HSTECH": ["^HSTE", "HKTECH.HK", "3032.HK"],
+    "HSCEI":  ["^HSCC", "2828.HK"],
+    "HSI":    ["2800.HK"],
+}
+
+
+# Module-level cache keyed by logical symbol. Holds the most recent
+# successful pull so transient yfinance outages don't wipe the snapshot.
+_YF_PRICE_CACHE: Dict[str, Tuple[pd.DataFrame, float]] = {}
+_YF_PRICE_CACHE_LOCK = threading.Lock()
+_YF_PRICE_CACHE_TTL = float(os.getenv("YF_PRICE_CACHE_TTL", "600"))
+
+
+def _yf_cache_put(logical: str, df: pd.DataFrame) -> None:
+    with _YF_PRICE_CACHE_LOCK:
+        _YF_PRICE_CACHE[logical] = (df.copy(), time.monotonic())
+
+
+def _yf_cache_get(logical: str, max_age: Optional[float] = None) -> Optional[pd.DataFrame]:
+    max_age = max_age if max_age is not None else _YF_PRICE_CACHE_TTL
+    with _YF_PRICE_CACHE_LOCK:
+        entry = _YF_PRICE_CACHE.get(logical)
+    if entry is None:
+        return None
+    df, cached_at = entry
+    if (time.monotonic() - cached_at) > max_age:
+        return df  # return stale; caller decides
+    return df
+
+
 class YFinanceResearchAdapter(DemoSnapshotAdapter):
     """Yahoo Finance open endpoint — research only, US/HK coverage.
 
     Note: Yahoo ToS forbids 'systematic scraping'. Use responsibly, throttle
     to ≥10s per request and prefer a licensed vendor for commercial paths.
+
+    Failure isolation
+    -----------------
+    A single delisted/404 ticker (notably ^HSTECH has been intermittently
+    unavailable) must not cascade and break every market-overview snapshot.
+    We download in small per-ticker slices with an explicit timeout, cache
+    the last successful pull per logical symbol and only fall back to the
+    deterministic demo series for the specific symbol that failed. The
+    envelope meta is stamped with a precise ``fallback_reason`` listing the
+    missing tickers so the frontend can surface ``fallback: partial``.
     """
 
     name = "yfinance-research"
@@ -308,65 +392,150 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
     delay_seconds = 900
     is_realtime = False
 
-    _YF_SYMBOL_MAP: Dict[str, str] = {
-        "000001.SS": "000001.SS",
-        "399001.SZ": "399001.SZ",
-        "399006.SZ": "399006.SZ",
-        "000300.SS": "000300.SS",
-        "000852.SS": "000852.SS",
-        "000905.SS": "000905.SS",
-        "000688.SS": "000688.SS",
-        "HSI": "^HSI",
-        "HSTECH": "^HSTECH",
-        "HSCEI": "^HSCE",
-        "NDX": "^NDX",
-        "SPX": "^GSPC",
-        "VIX": "^VIX",
-    }
+    _YF_SYMBOL_MAP = _YF_PRIMARY_MAP
+
+    _FETCH_TIMEOUT = float(os.getenv("YF_FETCH_TIMEOUT", "4.0"))
+    _MAX_TICKERS_PER_BATCH = int(os.getenv("YF_BATCH_SIZE", "6"))
 
     _degraded: bool = False
     _degrade_reason: Optional[str] = None
+    _missing: List[str] = []
 
-    def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
-        wanted = symbols or list(self._YF_SYMBOL_MAP.keys())
-        research_limiter().wait("yahoo")
+    def _download_batch(self, tickers: List[str]) -> Optional[pd.DataFrame]:
         try:
             import yfinance as yf  # type: ignore
         except Exception as exc:  # noqa: BLE001
             self._degraded = True
             self._degrade_reason = f"yfinance import failed: {exc}"
             logger.warning(self._degrade_reason)
-            return super().index_price_data(wanted)
-
-        mapped = [(logical, self._YF_SYMBOL_MAP.get(logical)) for logical in wanted]
-        tickers = [m for _, m in mapped if m]
+            return None
         try:
-            data = yf.download(
+            return yf.download(
                 tickers=tickers, period="2y", interval="1d",
-                group_by="ticker", auto_adjust=False, progress=False, threads=False,
+                group_by="ticker", auto_adjust=False, progress=False,
+                threads=True, timeout=self._FETCH_TIMEOUT,
             )
+        except TypeError:
+            # Older yfinance may not expose ``timeout``; retry without it.
+            try:
+                return yf.download(
+                    tickers=tickers, period="2y", interval="1d",
+                    group_by="ticker", auto_adjust=False, progress=False,
+                    threads=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("yfinance batch download failed (no-timeout retry): %s", exc)
+                return None
         except Exception as exc:  # noqa: BLE001
-            self._degraded = True
-            self._degrade_reason = f"yfinance network error: {exc}"
-            logger.warning(self._degrade_reason)
-            return super().index_price_data(wanted)
+            logger.warning("yfinance batch download failed: %s", exc)
+            return None
+
+    def _extract(self, data: Any, yf_symbol: str) -> pd.DataFrame:
+        try:
+            if isinstance(data, pd.DataFrame):
+                if isinstance(data.columns, pd.MultiIndex):
+                    if yf_symbol in data.columns.get_level_values(0):
+                        df = data[yf_symbol].dropna(how="all").copy()
+                    else:
+                        return pd.DataFrame()
+                else:
+                    df = data.dropna(how="all").copy()
+                if df.empty:
+                    return pd.DataFrame()
+                df.index.name = "Date"
+                return df
+        except Exception:  # noqa: BLE001
+            return pd.DataFrame()
+        return pd.DataFrame()
+
+    def _fetch_single(self, logical: str, candidates: List[str]) -> Optional[pd.DataFrame]:
+        for candidate in candidates:
+            if not candidate:
+                continue
+            data = self._download_batch([candidate])
+            if data is None:
+                continue
+            df = self._extract(data, candidate)
+            if not df.empty:
+                _yf_cache_put(logical, df)
+                return df
+        return None
+
+    def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
+        wanted = symbols or list(self._YF_SYMBOL_MAP.keys())
+        self._missing = []
+        demo_fallback = super().index_price_data(wanted)
+
+        # Non-blocking vendor throttle. If Yahoo was hit recently, we serve
+        # whatever we cached last and defer the retry to the background
+        # refresher.
+        slot_free = research_limiter().try_acquire("yahoo")
 
         out: Dict[str, pd.DataFrame] = {}
-        demo_fallback = super().index_price_data(wanted)
-        for logical, yf_symbol in mapped:
-            try:
-                if yf_symbol and isinstance(data, pd.DataFrame) and logical != yf_symbol:
-                    df = data[yf_symbol].dropna(how="all").copy()
-                else:
-                    df = pd.DataFrame()
-                if df.empty:
-                    raise ValueError("empty")
-                df.index.name = "Date"
-                out[logical] = df
-            except Exception:  # noqa: BLE001
+        pending: List[Tuple[str, str]] = []  # (logical, yf_symbol)
+        for logical in wanted:
+            primary = self._YF_SYMBOL_MAP.get(logical)
+            cached = _yf_cache_get(logical)
+            if cached is not None and not slot_free:
+                out[logical] = cached
+                continue
+            if primary is None:
+                # No mapping — definitively fall back to demo proxy.
                 out[logical] = demo_fallback.get(logical, pd.DataFrame())
-                self._degraded = True
-                self._degrade_reason = f"missing {logical} from yfinance"
+                continue
+            pending.append((logical, primary))
+
+        if not slot_free and not pending:
+            return out
+
+        if not pending:
+            return out
+
+        # Batch pull for the primaries we still need to fetch. Split into
+        # small batches so a single bad ticker can be isolated quickly.
+        primaries = [yf for _, yf in pending]
+        batch_data: Dict[str, pd.DataFrame] = {}
+        for i in range(0, len(primaries), self._MAX_TICKERS_PER_BATCH):
+            chunk = primaries[i : i + self._MAX_TICKERS_PER_BATCH]
+            downloaded = self._download_batch(chunk)
+            if downloaded is None:
+                continue
+            for yf_symbol in chunk:
+                df = self._extract(downloaded, yf_symbol)
+                if not df.empty:
+                    batch_data[yf_symbol] = df
+
+        for logical, yf_symbol in pending:
+            df = batch_data.get(yf_symbol)
+            if df is not None and not df.empty:
+                _yf_cache_put(logical, df)
+                out[logical] = df
+                continue
+
+            # Primary failed — try per-symbol fallback tickers, then the
+            # per-symbol cache, then the deterministic demo proxy.
+            alternates = _YF_FALLBACK_MAP.get(logical, [])
+            recovered = self._fetch_single(logical, alternates) if alternates else None
+            if recovered is not None:
+                out[logical] = recovered
+                self._missing.append(f"{logical}(primary {yf_symbol}→alt)")
+                continue
+
+            cached = _yf_cache_get(logical, max_age=24 * 3600)
+            if cached is not None and not cached.empty:
+                out[logical] = cached
+                self._missing.append(f"{logical}(cached)")
+                continue
+
+            out[logical] = demo_fallback.get(logical, pd.DataFrame())
+            self._missing.append(f"{logical}(demo)")
+
+        if self._missing:
+            self._degraded = True
+            self._degrade_reason = "partial: " + ", ".join(self._missing[:6])
+            if len(self._missing) > 6:
+                self._degrade_reason += f" …(+{len(self._missing) - 6})"
+            logger.info("yfinance partial: %s", self._degrade_reason)
         return out
 
     def meta(self, *, universe: str = "unknown", fallback_reason: Optional[str] = None) -> SourceMeta:
@@ -374,6 +543,7 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
         if self._degraded:
             base.source_name = "yfinance-research-degraded"
             base.fallback_reason = self._degrade_reason or "degraded"
+            base.is_proxy = True
         return base
 
 
