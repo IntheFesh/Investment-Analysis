@@ -98,7 +98,10 @@ export interface NewsItem {
   source: string;
   url: string;
   published_at: string;
+  lang?: 'zh' | 'en';
 }
+
+export type NewsStatus = 'fresh' | 'stale' | 'refreshing' | 'unavailable';
 
 import type { Evidence } from '@/components/ui/EvidencePanel';
 
@@ -149,6 +152,12 @@ export interface MarketOverview {
   news?: {
     domestic: NewsItem[];
     international: NewsItem[];
+    status?: NewsStatus;
+    age_seconds?: number | null;
+    sources_tried?: {
+      domestic?: string[];
+      international?: string[];
+    };
   };
   summary: string;
 }

@@ -8,6 +8,7 @@ times out; a background refresh against the real adapter is enqueued by
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Query
@@ -63,7 +64,7 @@ def _inline_demo_overview(market_view: str, time_window: str) -> Tuple[Dict[str,
                     "anomalies": [],
                 },
                 "explanations": [],
-                "news": {"domestic": [], "international": []},
+                "news": {"domestic": [], "international": [], "status": "refreshing", "age_seconds": None},
                 "summary": "暂无可用快照，正在后台刷新。",
             },
             {

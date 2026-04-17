@@ -25,7 +25,17 @@ from ..core.user_store import get_user_store
 router = APIRouter()
 
 
+_SENTIMENT_DEADLINE = 3.0
+_SENTIMENT_TTL = 60.0
+
+
 def _sentiment_snapshot(market_view: str) -> Optional[Dict[str, Any]]:
+    """Best-effort sentiment read. Never blocks portfolio response for long.
+
+    Uses a short deadline so a slow sentiment rebuild never stalls the
+    portfolio diagnosis / export endpoints. On timeout, falls through to
+    None — callers treat absent sentiment as "use neutral stress".
+    """
     adapter = get_data_source()
     key = f"sentiment:{market_view}:20D:{adapter.name}"
 
@@ -35,7 +45,9 @@ def _sentiment_snapshot(market_view: str) -> Optional[Dict[str, Any]]:
         return payload, src_meta
 
     try:
-        payload, _, _ = hot_cache().get(key, ttl=60.0, rebuild=rebuild)
+        payload, _, _ = hot_cache().get_with_deadline(
+            key, ttl=_SENTIMENT_TTL, deadline_seconds=_SENTIMENT_DEADLINE, rebuild=rebuild,
+        )
         return payload
     except Exception:  # noqa: BLE001
         return None

@@ -53,7 +53,11 @@ class HistoricalRequest(BaseModel):
     use_sentiment_stress: bool = False
 
 
+_SIM_SENTIMENT_DEADLINE = 2.5
+
+
 def _sentiment_stress(market_view: str) -> Optional[Dict[str, Any]]:
+    """Best-effort stress parameters. Deadline-bounded so submission stays fast."""
     adapter = get_data_source()
     key = f"sentiment:{market_view}:20D:{adapter.name}"
 
@@ -63,7 +67,9 @@ def _sentiment_stress(market_view: str) -> Optional[Dict[str, Any]]:
         return payload, src_meta
 
     try:
-        payload, _, _ = hot_cache().get(key, ttl=60.0, rebuild=rebuild)
+        payload, _, _ = hot_cache().get_with_deadline(
+            key, ttl=60.0, deadline_seconds=_SIM_SENTIMENT_DEADLINE, rebuild=rebuild,
+        )
         return payload.get("stress_parameters") if payload else None
     except Exception:  # noqa: BLE001
         return None
@@ -79,11 +85,14 @@ async def run_simulation(
     _, weights = resolve_weights(adapter, request.portfolio_id)
     watermark = portfolio_watermark(request.portfolio_id, weights)
 
-    stress = _sentiment_stress(request.market_view) if getattr(request, "use_sentiment_stress", False) else None
-
     async def worker(task) -> Dict[str, Any]:
         task.message = "读取组合数据"
         task.progress = 0.12
+        # Sentiment lookup happens inside the worker so endpoint submission
+        # never blocks on sentiment rebuild.
+        stress = await asyncio.to_thread(
+            _sentiment_stress, request.market_view,
+        ) if getattr(request, "use_sentiment_stress", False) else None
         await asyncio.sleep(0.02)
         if isinstance(request, StatisticalRequest):
             task.message = "分块自助抽样"

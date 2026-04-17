@@ -33,6 +33,9 @@ export type SourceTier =
 export type LicenseScope = 'commercial' | 'research_only' | 'internal_preview';
 export type MarketSession = 'pre' | 'open' | 'close' | 'after' | 'snapshot';
 
+export type FreshnessLabel = 'realtime' | 'delayed' | 'research' | 'stale' | 'seed' | 'fallback';
+export type CacheLayer = 'l1' | 'l2' | 'l3' | 'inline_demo' | 'miss';
+
 export interface ApiMeta {
   timestamp?: string;
   version?: string;
@@ -54,6 +57,16 @@ export interface ApiMeta {
   evidence_count?: number;
   market_session?: MarketSession;
   tz?: string;
+
+  // freshness metadata (pipeline-injected)
+  freshness_label?: FreshnessLabel;
+  cache_layer?: CacheLayer;
+  is_stale?: boolean;
+  age_seconds?: number;
+  partial?: boolean;
+  snapshot_updated_at?: string;
+  snapshot_latency_ms?: number;
+  snapshot_mode?: string;
 
   // legacy aliases
   data_source?: string;
