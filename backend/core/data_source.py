@@ -30,6 +30,8 @@ import logging
 import os
 import threading
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -327,8 +329,7 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
     _degraded: bool = False
     _degrade_reason: Optional[str] = None
 
-    def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
-        wanted = symbols or list(self._YF_SYMBOL_MAP.keys())
+    def _download_yf(self, mapped: List[Tuple[str, str]]) -> Dict[str, pd.DataFrame]:
         research_limiter().wait("yahoo")
         try:
             import yfinance as yf  # type: ignore
@@ -336,10 +337,11 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
             self._degraded = True
             self._degrade_reason = f"yfinance import failed: {exc}"
             logger.warning(self._degrade_reason)
-            return super().index_price_data(wanted)
+            return {}
 
-        mapped = [(logical, self._YF_SYMBOL_MAP.get(logical)) for logical in wanted]
         tickers = [m for _, m in mapped if m]
+        if not tickers:
+            return {}
         try:
             data = yf.download(
                 tickers=tickers, period="2y", interval="1d",
@@ -349,14 +351,16 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
             self._degraded = True
             self._degrade_reason = f"yfinance network error: {exc}"
             logger.warning(self._degrade_reason)
-            return super().index_price_data(wanted)
+            return {}
 
         out: Dict[str, pd.DataFrame] = {}
-        demo_fallback = super().index_price_data(wanted)
         for logical, yf_symbol in mapped:
             try:
-                if yf_symbol and isinstance(data, pd.DataFrame) and logical != yf_symbol:
-                    df = data[yf_symbol].dropna(how="all").copy()
+                if yf_symbol and isinstance(data, pd.DataFrame):
+                    if len(tickers) == 1 and "Adj Close" in data.columns:
+                        df = data.dropna(how="all").copy()
+                    else:
+                        df = data[yf_symbol].dropna(how="all").copy()
                 else:
                     df = pd.DataFrame()
                 if df.empty:
@@ -364,10 +368,14 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
                 df.index.name = "Date"
                 out[logical] = df
             except Exception:  # noqa: BLE001
-                out[logical] = demo_fallback.get(logical, pd.DataFrame())
                 self._degraded = True
                 self._degrade_reason = f"missing {logical} from yfinance"
         return out
+
+    def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
+        wanted = symbols or list(self._YF_SYMBOL_MAP.keys())
+        mapped = [(logical, self._YF_SYMBOL_MAP.get(logical, "")) for logical in wanted]
+        return self._download_yf([(l, y) for l, y in mapped if y])
 
     def meta(self, *, universe: str = "unknown", fallback_reason: Optional[str] = None) -> SourceMeta:
         base = super().meta(universe=universe, fallback_reason=fallback_reason)
@@ -375,6 +383,107 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
             base.source_name = "yfinance-research-degraded"
             base.fallback_reason = self._degrade_reason or "degraded"
         return base
+
+
+class HybridMarketResearchAdapter(YFinanceResearchAdapter):
+    """A股优先走公开指数接口，其余资产走Yahoo（研究用途，低频）。"""
+
+    name = "hybrid-research"
+    tier = "research_only"
+    truth_grade = "C"
+    license_scope = "research_only"
+    delay_seconds = 900
+
+    _cache_ttl = 45.0
+    _cache_lock = threading.Lock()
+    _cache: Dict[str, Tuple[float, pd.DataFrame]] = {}
+
+    _EM_SECID: Dict[str, str] = {
+        "000001.SS": "1.000001",
+        "000300.SS": "1.000300",
+        "000905.SS": "1.000905",
+        "000852.SS": "1.000852",
+        "000688.SS": "1.000688",
+        "399001.SZ": "0.399001",
+        "399006.SZ": "0.399006",
+    }
+
+    def _eastmoney_kline(self, symbol: str) -> pd.DataFrame:
+        secid = self._EM_SECID.get(symbol)
+        if not secid:
+            return pd.DataFrame()
+        key = f"em:{symbol}"
+        with self._cache_lock:
+            cached = self._cache.get(key)
+            if cached and (time.monotonic() - cached[0]) <= self._cache_ttl:
+                return cached[1].copy()
+
+        query = urllib.parse.urlencode({
+            "secid": secid,
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+            "klt": "101",
+            "fqt": "0",
+            "lmt": "520",
+        })
+        req = urllib.request.Request(
+            f"https://push2his.eastmoney.com/api/qt/stock/kline/get?{query}",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=4.5) as resp:  # nosec B310
+            raw = resp.read().decode("utf-8", errors="ignore")
+
+        import json
+
+        payload = json.loads(raw)
+        klines = (payload.get("data") or {}).get("klines") or []
+        rows = []
+        for row in klines:
+            parts = row.split(",")
+            if len(parts) < 6:
+                continue
+            dt, open_, close, high, low, vol = parts[:6]
+            rows.append({
+                "Date": pd.to_datetime(dt),
+                "Open": float(open_),
+                "High": float(high),
+                "Low": float(low),
+                "Close": float(close),
+                "Adj Close": float(close),
+                "Volume": max(float(vol), 0.0),
+            })
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows).set_index("Date")
+        df.index.name = "Date"
+        with self._cache_lock:
+            self._cache[key] = (time.monotonic(), df)
+        return df.copy()
+
+    def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
+        wanted = symbols or list(required_symbols_for("cn_a"))
+        out: Dict[str, pd.DataFrame] = {}
+        remain: List[str] = []
+        for symbol in wanted:
+            if symbol in self._EM_SECID:
+                try:
+                    df = self._eastmoney_kline(symbol)
+                    if not df.empty:
+                        out[symbol] = df
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    self._degraded = True
+                    self._degrade_reason = f"eastmoney fetch failed: {exc}"
+            remain.append(symbol)
+
+        yf_pairs = [(logical, self._YF_SYMBOL_MAP.get(logical, "")) for logical in remain]
+        out.update(self._download_yf([(l, y) for l, y in yf_pairs if y]))
+
+        missing = [s for s in wanted if s not in out]
+        if missing:
+            self._degraded = True
+            self._degrade_reason = f"missing symbols: {','.join(missing[:6])}"
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +495,8 @@ _ADAPTERS: Dict[str, Callable[[], DataSourceAdapter]] = {
     "demo": DemoSnapshotAdapter,
     "yfinance": YFinanceResearchAdapter,
     "yfinance-research": YFinanceResearchAdapter,
+    "hybrid": HybridMarketResearchAdapter,
+    "hybrid-research": HybridMarketResearchAdapter,
 }
 
 
@@ -396,7 +507,7 @@ def get_data_source() -> DataSourceAdapter:
     global _SELECTED
     if _SELECTED is not None:
         return _SELECTED
-    choice = os.getenv("DATA_SOURCE", "yfinance").strip().lower()
+    choice = os.getenv("DATA_SOURCE", "hybrid").strip().lower()
     factory = _ADAPTERS.get(choice, DemoSnapshotAdapter)
     _SELECTED = factory()
     logger.info("data source adapter: %s (tier=%s, grade=%s)", _SELECTED.name, _SELECTED.tier, _SELECTED.truth_grade)

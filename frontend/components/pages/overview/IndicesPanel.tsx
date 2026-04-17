@@ -68,20 +68,15 @@ function IndexCard({ item, expanded, onToggle }: { item: IndexRow; expanded: boo
           </div>
 
           <div className="rounded-lg border border-border/70 bg-surface-raised/60 p-3">
-            <div className="text-caption text-text-tertiary">板块贡献（代理）</div>
+            <div className="text-caption text-text-tertiary">板块贡献</div>
             <div className="mt-2 space-y-1.5">
               {(item.contributors ?? []).map((c) => (
-                <div key={c.name}>
-                  <div className="flex items-center justify-between text-caption">
+                <div key={c.name} className="flex items-center justify-between text-caption border-b border-border/50 pb-1.5 last:border-b-0 last:pb-0">
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-block h-1.5 w-1.5 rounded-full ${c.value >= 0 ? 'bg-up' : 'bg-down'}`} />
                     <span className="text-text-secondary">{c.name}</span>
-                    <span className={toneClass(c.value)}>{formatPercent(c.value * 100)}</span>
                   </div>
-                  <div className="h-1.5 rounded-full bg-surface-sunken mt-1 overflow-hidden">
-                    <div
-                      className={`h-full ${c.value >= 0 ? 'bg-gradient-to-r from-up/40 to-up' : 'bg-gradient-to-r from-down/40 to-down'}`}
-                      style={{ width: `${Math.min(100, Math.max(8, Math.abs(c.value) * 100))}%` }}
-                    />
-                  </div>
+                  <span className={toneClass(c.value)}>{formatPercent(c.value * 100)}</span>
                 </div>
               ))}
             </div>
@@ -90,7 +85,7 @@ function IndexCard({ item, expanded, onToggle }: { item: IndexRow; expanded: boo
           <div className="rounded-lg border border-border/70 bg-surface-raised/60 p-3">
             <div className="flex items-center justify-between">
               <div className="text-caption text-text-tertiary">基差 / 领涨跌</div>
-              <div className="text-caption text-text-secondary">{item.basis?.name ?? '期现基差(代理)'}</div>
+              <div className="text-caption text-text-secondary">{item.basis?.name ?? '期现价差'}</div>
             </div>
             <div className={`text-body-md tabular mt-1 ${toneClass(item.basis?.value ?? 0)}`}>
               {formatPercent(item.basis?.value ?? 0)}

@@ -7,8 +7,8 @@ export interface MarketQuery {
 }
 
 export const marketService = {
-  async getOverview(params: MarketQuery): Promise<UnwrappedEnvelope<MarketOverview>> {
-    const res = await apiClient.get('/api/v1/market/overview', { params });
+  async getOverview(params: MarketQuery, signal?: AbortSignal): Promise<UnwrappedEnvelope<MarketOverview>> {
+    const res = await apiClient.get('/api/v1/market/overview', { params, signal });
     return unwrapApiEnvelope<MarketOverview>(res.data);
   },
 };
