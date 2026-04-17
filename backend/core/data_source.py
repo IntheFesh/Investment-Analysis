@@ -539,6 +539,37 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
 
     _EM_TIMEOUT = float(os.getenv("EASTMONEY_TIMEOUT_SECONDS", "3.0"))
 
+    @staticmethod
+    def _parse_em_date(raw: str) -> Optional[datetime]:
+        """Parse Eastmoney kline date strictly. Returns None when unparseable
+        or out of the calendar range we can safely represent.
+
+        Eastmoney daily klines return ``YYYY-MM-DD``; some weekly endpoints
+        emit ``YYYYMMDD``. We avoid ``pd.to_datetime`` because on constrained
+        platforms pandas may route inference through ``datetime.fromtimestamp``,
+        which raises ``OverflowError: timestamp out of range for platform
+        time_t`` for any value pandas misreads as a Unix epoch (e.g. a large
+        numeric-looking string). Explicit parsing bypasses that path.
+        """
+        s = (raw or "").strip()
+        if not s:
+            return None
+        for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d"):
+            try:
+                dt = datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+            # Reject dates outside a safe window so downstream ops that may
+            # still call Python's time_t-backed conversions never explode.
+            if 1971 <= dt.year <= 2037:
+                return dt
+            # Widen bounds for 64-bit systems while still excluding obvious
+            # garbage (year 0, 9999 sentinel, etc.)
+            if 1900 <= dt.year <= 2100:
+                return dt
+            return None
+        return None
+
     def _eastmoney_kline(self, symbol: str) -> pd.DataFrame:
         secid = self._EM_SECID.get(symbol)
         if not secid:
@@ -573,7 +604,7 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
         if not raw:
-            logger.info("eastmoney timeout for %s: %s", symbol, last_exc)
+            logger.info("eastmoney network fail for %s: %s", symbol, last_exc)
             return pd.DataFrame()
 
         import json
@@ -581,31 +612,61 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
         try:
             payload = json.loads(raw)
         except Exception as exc:  # noqa: BLE001
-            logger.info("eastmoney parse failed for %s: %s", symbol, exc)
+            logger.info("eastmoney json decode failed for %s: %s", symbol, exc)
             return pd.DataFrame()
         klines = (payload.get("data") or {}).get("klines") or []
+        if not klines:
+            logger.info("eastmoney empty payload for %s (secid=%s)", symbol, secid)
+            return pd.DataFrame()
+
         rows = []
+        rejected_date = 0
+        rejected_numeric = 0
         for row in klines:
             parts = row.split(",")
             if len(parts) < 6:
                 continue
-            dt, open_, close, high, low, vol = parts[:6]
+            dt_raw, open_, close, high, low, vol = parts[:6]
+            dt_obj = self._parse_em_date(dt_raw)
+            if dt_obj is None:
+                rejected_date += 1
+                continue
             try:
-                rows.append({
-                    "Date": pd.to_datetime(dt),
+                rec = {
+                    "Date": dt_obj,
                     "Open": float(open_),
                     "High": float(high),
                     "Low": float(low),
                     "Close": float(close),
                     "Adj Close": float(close),
                     "Volume": max(float(vol), 0.0),
-                })
-            except Exception:  # noqa: BLE001
+                }
+            except (TypeError, ValueError):
+                rejected_numeric += 1
                 continue
+            rows.append(rec)
+
+        if rejected_date or rejected_numeric:
+            logger.info(
+                "eastmoney row filter for %s: kept=%d rejected_date=%d rejected_numeric=%d",
+                symbol, len(rows), rejected_date, rejected_numeric,
+            )
         if not rows:
             return pd.DataFrame()
-        df = pd.DataFrame(rows).set_index("Date")
-        df.index.name = "Date"
+
+        try:
+            df = pd.DataFrame(rows)
+            # Build DatetimeIndex without going through pandas' inference.
+            df["Date"] = pd.DatetimeIndex(df["Date"])
+            df = df.set_index("Date").sort_index()
+            df.index.name = "Date"
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "eastmoney frame build failed for %s (rows=%d): %s",
+                symbol, len(rows), exc,
+            )
+            return pd.DataFrame()
+
         with self._cache_lock:
             self._cache[key] = (now, df.copy())
         return df

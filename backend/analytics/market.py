@@ -29,6 +29,28 @@ _NEWS_TIMEOUT = float(os.environ.get("NEWS_TIMEOUT_SECONDS", "2.0"))
 _NEWS_INFLIGHT: Dict[str, bool] = {}
 
 
+def _safe_ts_to_str(ts: Any) -> str:
+    """Convert a Unix timestamp (int or str) to 'YYYY-MM-DD HH:MM' safely.
+
+    Protects against ``OverflowError: timestamp out of range for platform
+    time_t`` raised by ``datetime.fromtimestamp`` on platforms with a
+    restricted ``time_t`` range. Returns "" when the input is unusable.
+    """
+    if ts is None or ts == "":
+        return ""
+    try:
+        ts_int = int(ts)
+    except (TypeError, ValueError):
+        return ""
+    # Clamp to a window we know every platform can represent.
+    if not (0 < ts_int < 4_102_444_800):  # 1970..2100
+        return ""
+    try:
+        return datetime.fromtimestamp(ts_int, tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
 def _query_yahoo_news(q: str, count: int = 5) -> List[Dict[str, Any]]:
     url = "https://query1.finance.yahoo.com/v1/finance/search?" + urllib.parse.urlencode({"q": q, "newsCount": count})
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -41,30 +63,86 @@ def _query_yahoo_news(q: str, count: int = 5) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for item in rows:
         provider = item.get("publisher") or ""
-        ts = item.get("providerPublishTime")
-        try:
-            ts_str = datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
-        except Exception:  # noqa: BLE001
-            ts_str = ""
         out.append(
             {
                 "title": str(item.get("title") or "").strip(),
                 "source": str(provider).strip(),
                 "url": str(item.get("link") or "").strip(),
-                "published_at": ts_str,
+                "published_at": _safe_ts_to_str(item.get("providerPublishTime")),
+                "lang": "en",
             }
         )
     return [x for x in out if x["title"] and x["url"]][:count]
 
 
+def _query_eastmoney_news(channel: str, count: int = 5) -> List[Dict[str, Any]]:
+    """Fetch Chinese-language headlines from Eastmoney's public JSON feed.
+
+    ``channel`` selects the board (``stock`` A-share, ``hk`` Hong Kong,
+    ``global`` overseas). Used as a backup when Yahoo is unreachable or
+    irrelevant (Chinese headlines for domestic markets).
+    """
+    board_map = {
+        "stock": "102",   # A股要闻
+        "hk": "114",      # 港股
+        "global": "110",  # 海外宏观
+    }
+    code = board_map.get(channel, "102")
+    url = (
+        "https://np-listapi.eastmoney.com/comm/web/getListInfo?"
+        + urllib.parse.urlencode({"client": "web", "mTypeAndCode": code, "type": "1", "pageSize": max(count, 6)})
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.eastmoney.com/"})
+    try:
+        with urllib.request.urlopen(req, timeout=_NEWS_TIMEOUT) as resp:  # nosec B310
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    except Exception:  # noqa: BLE001
+        return []
+    rows = (((payload.get("data") or {}).get("list") or []) if isinstance(payload, dict) else []) or []
+    out: List[Dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("Art_Title") or item.get("title") or "").strip()
+        link = str(item.get("Art_Url") or item.get("url") or "").strip()
+        pub = str(item.get("Art_ShowTime") or item.get("showtime") or "").strip()
+        source = str(item.get("Art_Source") or item.get("source") or "东方财富").strip()
+        if not title or not link:
+            continue
+        out.append(
+            {
+                "title": title,
+                "source": source,
+                "url": link,
+                "published_at": pub[:16],
+                "lang": "zh",
+            }
+        )
+    return out[:count]
+
+
 def _fetch_news_blocking(market_view: str) -> Dict[str, Any]:
     topics = {
-        "cn_a": ("A股 上证 深证 宏观政策", "global markets fed nasdaq bond"),
-        "hk": ("港股 恒生 科技指数 南向资金", "global markets fed nasdaq bond"),
-        "global": ("中国经济 A股 港股", "global markets fed nasdaq bond oil dollar"),
+        "cn_a": ("A股 上证 深证 宏观政策", "global markets fed nasdaq bond", "stock", "global"),
+        "hk":   ("港股 恒生 科技指数 南向资金", "global markets fed nasdaq bond", "hk", "global"),
+        "global": ("中国经济 A股 港股", "global markets fed nasdaq bond oil dollar", "stock", "global"),
     }
-    cn_q, glb_q = topics.get(market_view, topics["cn_a"])
-    news = {"domestic": _query_yahoo_news(cn_q), "international": _query_yahoo_news(glb_q)}
+    cn_q, glb_q, cn_board, glb_board = topics.get(market_view, topics["cn_a"])
+    # Prefer Chinese source for domestic headlines; fall back to Yahoo if empty.
+    domestic = _query_eastmoney_news(cn_board, count=5)
+    if not domestic:
+        domestic = _query_yahoo_news(cn_q, count=5)
+    international = _query_yahoo_news(glb_q, count=5)
+    if not international:
+        international = _query_eastmoney_news(glb_board, count=5)
+    news = {
+        "domestic": domestic,
+        "international": international,
+        "sources_tried": {
+            "domestic": ["eastmoney", "yahoo"],
+            "international": ["yahoo", "eastmoney"],
+        },
+    }
     now_ts = datetime.now(timezone.utc).timestamp()
     with _NEWS_LOCK:
         _NEWS_CACHE[market_view] = (now_ts, news)
@@ -72,13 +150,25 @@ def _fetch_news_blocking(market_view: str) -> Dict[str, Any]:
 
 
 def _fetch_news(market_view: str) -> Dict[str, Any]:
-    """Return cached news immediately; trigger async refresh on stale. Never raises."""
+    """Return cached news immediately; trigger async refresh on stale. Never raises.
+
+    The returned payload always includes a ``status`` field:
+      - ``fresh``: cache populated within ``_NEWS_TTL``
+      - ``stale``: cache exists but older than TTL; background refresh scheduled
+      - ``refreshing``: no cache yet; background refresh scheduled
+      - ``unavailable``: no cache and no in-flight refresh succeeded
+    """
     now_ts = datetime.now(timezone.utc).timestamp()
     with _NEWS_LOCK:
         cached = _NEWS_CACHE.get(market_view)
         inflight = _NEWS_INFLIGHT.get(market_view, False)
+
     if cached and (now_ts - cached[0]) <= _NEWS_TTL:
-        return cached[1]
+        payload = dict(cached[1])
+        payload["status"] = "fresh"
+        payload["age_seconds"] = round(now_ts - cached[0], 1)
+        return payload
+
     # Schedule non-blocking refresh; serve stale (or empty) immediately.
     if not inflight:
         with _NEWS_LOCK:
@@ -94,7 +184,18 @@ def _fetch_news(market_view: str) -> Dict[str, Any]:
                     _NEWS_INFLIGHT[market_view] = False
 
         threading.Thread(target=_worker, name=f"news-refresh-{market_view}", daemon=True).start()
-    return cached[1] if cached else {"domestic": [], "international": []}
+
+    if cached:
+        payload = dict(cached[1])
+        payload["status"] = "stale"
+        payload["age_seconds"] = round(now_ts - cached[0], 1)
+        return payload
+    return {
+        "domestic": [],
+        "international": [],
+        "status": "refreshing" if inflight else "refreshing",
+        "age_seconds": None,
+    }
 
 
 def _window(time_window: str) -> int:
@@ -144,7 +245,7 @@ def _empty_payload(universe_id: str, universe_label: str, market_view: str, time
             "anomalies": [],
         },
         "explanations": [],
-        "news": {"domestic": [], "international": []},
+        "news": {"domestic": [], "international": [], "status": "refreshing", "age_seconds": None},
         "summary": "数据正在准备中，稍后自动刷新。",
     }
 

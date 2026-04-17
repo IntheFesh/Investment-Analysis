@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import type { ApiMeta, SourceTier, TruthGrade } from '@/lib/apiTypes';
+import type { ApiMeta, FreshnessLabel, SourceTier, TruthGrade } from '@/lib/apiTypes';
 import { formatTimestamp } from '@/utils/format';
 
 interface DataSourceBadgeProps {
@@ -57,8 +57,24 @@ export function DataSourceBadge({ meta, className, compact = false }: DataSource
   const methodVersion = meta.calculation_method_version as string | undefined;
 
   const tone = GRADE_HUE[grade] ?? GRADE_HUE.E;
-  const timeliness = isRealtime
+  const freshness = (meta.freshness_label as FreshnessLabel | undefined) ?? null;
+  const isStale = Boolean(meta.is_stale);
+  const cacheLayer = meta.cache_layer as string | undefined;
+  const age = typeof meta.age_seconds === 'number' ? meta.age_seconds : null;
+  const timeliness = freshness === 'realtime' || isRealtime
     ? '实时'
+    : freshness === 'delayed'
+    ? delaySeconds > 0
+      ? `延迟 ${delaySeconds >= 900 ? `${Math.round(delaySeconds / 60)}m` : `${delaySeconds}s`}`
+      : '延迟'
+    : freshness === 'research'
+    ? '研究'
+    : freshness === 'stale' || isStale
+    ? age != null ? `缓存 ${Math.round(age)}s` : '缓存'
+    : freshness === 'seed'
+    ? '初始化'
+    : freshness === 'fallback'
+    ? '回退'
     : delaySeconds >= 900
     ? `延迟 ${Math.round(delaySeconds / 60)}m`
     : delaySeconds > 0
@@ -68,6 +84,8 @@ export function DataSourceBadge({ meta, className, compact = false }: DataSource
   const tooltipParts = [
     `来源 ${name}`,
     `分级 ${grade} · ${TIER_LABEL[tier]}`,
+    freshness ? `新鲜度 ${freshness}${age != null ? ` (${Math.round(age)}s)` : ''}` : null,
+    cacheLayer ? `缓存层 ${cacheLayer}` : null,
     asOf ? `截止 ${asOf}` : null,
     methodVersion ? `算法 ${methodVersion}` : null,
     fallbackReason ? `降级原因 ${fallbackReason}` : null,
@@ -91,6 +109,7 @@ export function DataSourceBadge({ meta, className, compact = false }: DataSource
       <span className="text-text-tertiary">· {timeliness}</span>
       {isProxy ? <span className="text-warn">· 代理</span> : null}
       {isDemo ? <span className="text-warn">· 演示</span> : null}
+      {isStale && freshness !== 'seed' && !isDemo ? <span className="text-warn">· 缓存</span> : null}
       {fallbackReason ? <span className="text-warn">· 降级</span> : null}
       {asOf ? (
         <span className="text-text-tertiary">· {compact ? asOf.slice(0, 10) : `截止 ${formatTimestamp(asOf, { includeSeconds: false })}`}</span>

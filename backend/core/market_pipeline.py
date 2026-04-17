@@ -317,7 +317,15 @@ class MarketSnapshotPipeline:
         payload, src_meta, ev_count = build_overview(adapter, window, view)
         src_meta["evidence_count"] = ev_count
         src_meta["snapshot_mode"] = "async_precomputed"
-        src_meta["freshness_label"] = "research" if src_meta.get("source_tier") in {"research_only", "derived"} else "delayed"
+        tier = src_meta.get("source_tier")
+        if tier == "production_authorized":
+            src_meta["freshness_label"] = "realtime"
+        elif tier == "production_delayed":
+            src_meta["freshness_label"] = "delayed"
+        elif tier in {"research_only", "derived"}:
+            src_meta["freshness_label"] = "research"
+        else:
+            src_meta["freshness_label"] = "fallback"
         return payload, src_meta
 
     def _schedule_bg_refresh(self, view: str, window: str) -> None:
@@ -331,6 +339,21 @@ class MarketSnapshotPipeline:
         except Exception:  # noqa: BLE001
             return
 
+    _STALE_AFTER_SECONDS = float(os.getenv("MARKET_STALE_AFTER_SECONDS", "180"))
+
+    def _stamp_freshness(self, meta: Dict[str, Any], stored_at: float, now: float, layer: str) -> Dict[str, Any]:
+        out = dict(meta)
+        age = max(0.0, now - stored_at)
+        out["age_seconds"] = round(age, 2)
+        out["cache_layer"] = layer
+        is_stale = age > self._STALE_AFTER_SECONDS
+        out["is_stale"] = bool(is_stale)
+        # Preserve seed / fallback labels; only relabel when actually stale.
+        existing = out.get("freshness_label")
+        if is_stale and existing not in {"seed", "fallback"}:
+            out["freshness_label"] = "stale"
+        return out
+
     def get_snapshot(self, view: str, window: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], str]:
         started = time.perf_counter()
         adapter = get_data_source()
@@ -343,7 +366,7 @@ class MarketSnapshotPipeline:
                 with self._stats_lock:
                     self._stats.l1_hits += 1
                 self._record_api_latency(started)
-                return l1[1], dict(l1[2]), "l1"
+                return l1[1], self._stamp_freshness(l1[2], l1[3], now, "l1"), "l1"
 
         l2 = self._l2.get(key)
         if l2:
@@ -354,7 +377,7 @@ class MarketSnapshotPipeline:
                 self._stats.l2_hits += 1
             self._record_api_latency(started)
             self._schedule_bg_refresh(view, window)
-            return payload, dict(meta), "l2"
+            return payload, self._stamp_freshness(meta, stored_at, now, "l2"), "l2"
 
         l3 = self._l3.get(key)
         if l3:
@@ -366,7 +389,7 @@ class MarketSnapshotPipeline:
                 self._stats.l3_hits += 1
             self._record_api_latency(started)
             self._schedule_bg_refresh(view, window)
-            return payload, dict(meta), "l3"
+            return payload, self._stamp_freshness(meta, stored_at, now, "l3"), "l3"
 
         with self._stats_lock:
             self._stats.misses += 1
@@ -378,8 +401,11 @@ class MarketSnapshotPipeline:
             "source_tier": adapter.tier,
             "truth_grade": adapter.truth_grade,
             "is_realtime": False,
+            "is_stale": True,
+            "age_seconds": -1,
             "fallback_reason": "snapshot_not_ready",
             "snapshot_mode": "cache_only",
+            "freshness_label": "fallback",
         }, "miss"
 
     def _record_api_latency(self, started: float) -> None:

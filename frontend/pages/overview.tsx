@@ -70,6 +70,8 @@ export default function OverviewPage() {
             <NewsPanel
               domestic={overview.news?.domestic ?? []}
               international={overview.news?.international ?? []}
+              status={overview.news?.status}
+              ageSeconds={overview.news?.age_seconds ?? null}
             />
           ) : null}
         </>

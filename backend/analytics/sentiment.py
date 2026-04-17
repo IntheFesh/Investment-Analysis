@@ -291,6 +291,57 @@ def _time_series(data: Dict[str, pd.DataFrame], universe_pool: List[str], liq_sy
     return ts
 
 
+def build_empty_payload(market_view: str, time_window: str) -> Dict[str, Any]:
+    """Schema-valid skeleton used when upstream sentiment compute is unready.
+
+    Returned with ``meta.partial=true`` / ``meta.is_stale=true`` so the UI can
+    show a "计算中" placeholder instead of failing.
+    """
+    try:
+        universe = get_universe(market_view)
+        universe_id = universe.id
+        universe_label = universe.label
+    except Exception:  # noqa: BLE001
+        universe_id = market_view
+        universe_label = market_view
+    neutral_factor = {
+        "id": "volatility_tail",
+        "name": "波动与尾部",
+        "short_score": 50.0,
+        "mid_score": 50.0,
+        "direction": "up",
+        "driver": "指标不足",
+        "indicators": {},
+        "indicators_mid": {},
+    }
+    return {
+        "market_view": market_view,
+        "universe_id": universe_id,
+        "universe_label": universe_label,
+        "time_window": time_window,
+        "short_term_score": 50.0,
+        "mid_term_score": 50.0,
+        "short_term_label": "中性",
+        "mid_term_label": "中性",
+        "short_term_state": "neutral",
+        "mid_term_state": "neutral",
+        "state_transition": {"direction": "stable", "delta": 0.0, "short_state": "neutral", "mid_state": "neutral"},
+        "short_term_drivers": [],
+        "mid_term_drivers": [],
+        "factors": [neutral_factor],
+        "time_series": [],
+        "contributions": [],
+        "stress_parameters": {
+            "equity_shock_multiplier": 1.0,
+            "volatility_scale": 1.0,
+            "cross_asset_spillover": 0.3,
+            "notes": "data unavailable — using neutral defaults",
+        },
+        "method_version": METHOD_VERSION,
+        "partial": True,
+    }
+
+
 def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: str) -> Dict[str, Any]:
     universe = get_universe(market_view)
     syms = required_symbols_for(market_view)
