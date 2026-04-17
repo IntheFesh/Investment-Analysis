@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from .core.data_source import get_data_source
 from .core.envelope import build_meta
+from .core.market_pipeline import get_market_pipeline
 from .core.scheduler import register_default_jobs
 from .routers import (
     backtest,
@@ -67,6 +68,12 @@ app.include_router(scheduler.router, prefix="/api/v1/scheduler", tags=["schedule
 @app.on_event("startup")
 async def _on_startup() -> None:
     register_default_jobs()
+    await get_market_pipeline().start()
+
+
+@app.on_event("shutdown")
+async def _on_shutdown() -> None:
+    await get_market_pipeline().stop()
 
 
 @app.exception_handler(Exception)
