@@ -8,13 +8,14 @@ times out; a background refresh against the real adapter is enqueued by
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Query
 
 from ..analytics.market import build_overview
-from ..core.data_source import DemoSnapshotAdapter
+from ..core.data_source import DemoSnapshotAdapter, get_data_source
 from ..core.envelope import ok
 from ..core.market_pipeline import get_market_pipeline
 
@@ -94,6 +95,45 @@ def _get_overview(market_view: str, time_window: str) -> Tuple[Dict[str, Any], D
         out_meta["is_realtime"] = False
         out_meta.setdefault("fallback_reason", "snapshot_not_ready")
     return payload, out_meta
+
+
+async def _upgrade_live_if_needed(
+    market_view: str,
+    time_window: str,
+    payload: Dict[str, Any],
+    meta: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """When cached data is fallback-demo, try one bounded live refresh.
+
+    This keeps the page usable on cold start while still honoring the
+    "open-source realtime" requirement whenever upstream responds quickly.
+    """
+    if (meta.get("source_tier") or "").lower() != "fallback_demo":
+        return payload, meta
+
+    def _build_live() -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        live_payload, src_meta, ev_count = build_overview(get_data_source(), time_window, market_view)
+        src_meta["evidence_count"] = ev_count
+        src_meta["snapshot_mode"] = "request_live_upgrade"
+        tier = (src_meta.get("source_tier") or "").lower()
+        if tier == "production_authorized":
+            src_meta["freshness_label"] = "realtime"
+        elif tier == "production_delayed":
+            src_meta["freshness_label"] = "delayed"
+        elif tier in {"research_only", "derived"}:
+            src_meta["freshness_label"] = "research"
+        else:
+            src_meta["freshness_label"] = "fallback"
+        return live_payload, src_meta
+
+    try:
+        live_payload, live_meta = await asyncio.wait_for(asyncio.to_thread(_build_live), timeout=6.0)
+        merged_meta = dict(meta)
+        merged_meta.update({k: v for k, v in live_meta.items() if v is not None})
+        merged_meta["cache_layer"] = "request_live"
+        return live_payload, merged_meta
+    except Exception:  # noqa: BLE001
+        return payload, meta
 
 
 @router.get("/overview")
