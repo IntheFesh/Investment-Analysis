@@ -12,6 +12,8 @@ export function useMarketOverview(timeWindow: string = '20D') {
   const queryKey = queryKeys.market.overview(marketView, timeWindow);
 
   useEffect(() => {
+    // Abort in-flight requests for other (view,window) combos so switching
+    // does not pile up stale fetches.
     qc.cancelQueries({ queryKey: ['market', 'overview'], exact: false });
   }, [qc, marketView, timeWindow]);
 
@@ -19,16 +21,32 @@ export function useMarketOverview(timeWindow: string = '20D') {
     queryKey,
     ({ signal }) => marketService.getOverview({ market_view: marketView, time_window: timeWindow }, signal),
     {
-      staleTime: 45 * 1000,
+      staleTime: 60 * 1000,
       cacheTime: 10 * 60 * 1000,
       keepPreviousData: true,
-      retry: 1,
-      retryDelay: 250,
+      retry: (failureCount, error: unknown) => {
+        const code = (error as { code?: string })?.code;
+        if (code === 'TIMEOUT' || code === 'BACKEND_UNAVAILABLE' || code === 'NETWORK_ERROR') {
+          return failureCount < 2;
+        }
+        return failureCount < 1;
+      },
+      retryDelay: (attempt) => Math.min(1500, 400 * 2 ** attempt),
       refetchOnReconnect: false,
       refetchOnWindowFocus: false,
       placeholderData: () => {
-        const fallback = qc.getQueryData<UnwrappedEnvelope<MarketOverview>>(queryKeys.market.overview(marketView, '20D'));
-        return fallback;
+        // While switching time windows or market views, show the most recent
+        // successful snapshot for the same marketView (any window) so the UI
+        // never flashes empty.
+        const sameViewAnyWindow = ['20D', '5D', '60D', '120D', 'YTD', '1Y'].reduce<
+          UnwrappedEnvelope<MarketOverview> | undefined
+        >((acc, w) => {
+          if (acc) return acc;
+          return qc.getQueryData<UnwrappedEnvelope<MarketOverview>>(
+            queryKeys.market.overview(marketView, w),
+          );
+        }, undefined);
+        return sameViewAnyWindow;
       },
     },
   );

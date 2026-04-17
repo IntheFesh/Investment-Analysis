@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import os
+import threading
 from typing import Any, Dict, List, Tuple
 import urllib.parse
 import urllib.request
@@ -17,69 +19,134 @@ from ..core.universe import SectorBasket, UniverseConfig, get_universe, name_of,
 
 
 METHOD_VERSION = "mkt.v3"
+
+# News is an optional enrichment. We cache it independently of the market
+# snapshot so a Yahoo news timeout never blocks the snapshot refresh.
 _NEWS_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_NEWS_LOCK = threading.Lock()
+_NEWS_TTL = float(os.environ.get("NEWS_CACHE_TTL", "900"))   # 15 min
+_NEWS_TIMEOUT = float(os.environ.get("NEWS_TIMEOUT_SECONDS", "2.0"))
+_NEWS_INFLIGHT: Dict[str, bool] = {}
 
 
-def _fetch_news(market_view: str) -> Dict[str, Any]:
-    now_ts = datetime.now(timezone.utc).timestamp()
-    cached = _NEWS_CACHE.get(market_view)
-    if cached and (now_ts - cached[0]) <= 300:
-        return cached[1]
+def _query_yahoo_news(q: str, count: int = 5) -> List[Dict[str, Any]]:
+    url = "https://query1.finance.yahoo.com/v1/finance/search?" + urllib.parse.urlencode({"q": q, "newsCount": count})
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=_NEWS_TIMEOUT) as resp:  # nosec B310
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    except Exception:  # noqa: BLE001
+        return []
+    rows = payload.get("news") or []
+    out: List[Dict[str, Any]] = []
+    for item in rows:
+        provider = item.get("publisher") or ""
+        ts = item.get("providerPublishTime")
+        try:
+            ts_str = datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception:  # noqa: BLE001
+            ts_str = ""
+        out.append(
+            {
+                "title": str(item.get("title") or "").strip(),
+                "source": str(provider).strip(),
+                "url": str(item.get("link") or "").strip(),
+                "published_at": ts_str,
+            }
+        )
+    return [x for x in out if x["title"] and x["url"]][:count]
 
+
+def _fetch_news_blocking(market_view: str) -> Dict[str, Any]:
     topics = {
         "cn_a": ("A股 上证 深证 宏观政策", "global markets fed nasdaq bond"),
         "hk": ("港股 恒生 科技指数 南向资金", "global markets fed nasdaq bond"),
         "global": ("中国经济 A股 港股", "global markets fed nasdaq bond oil dollar"),
     }
     cn_q, glb_q = topics.get(market_view, topics["cn_a"])
-
-    def _query(q: str, count: int = 5) -> List[Dict[str, Any]]:
-        url = "https://query1.finance.yahoo.com/v1/finance/search?" + urllib.parse.urlencode({"q": q, "newsCount": count})
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        payload = None
-        last_exc: Exception | None = None
-        for _attempt in range(2):
-            try:
-                with urllib.request.urlopen(req, timeout=2.8) as resp:  # nosec B310
-                    payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
-                break
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-        if payload is None:
-            raise RuntimeError(f"yahoo_news_failed: {last_exc}")
-        rows = payload.get("news") or []
-        out: List[Dict[str, Any]] = []
-        for item in rows:
-            provider = item.get("publisher") or ""
-            ts = item.get("providerPublishTime")
-            try:
-                ts_str = datetime.fromtimestamp(int(ts), tz=timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M")
-            except Exception:  # noqa: BLE001
-                ts_str = ""
-            out.append(
-                {
-                    "title": str(item.get("title") or "").strip(),
-                    "source": str(provider).strip(),
-                    "url": str(item.get("link") or "").strip(),
-                    "published_at": ts_str,
-                }
-            )
-        return [x for x in out if x["title"] and x["url"]][:count]
-
-    try:
-        news = {"domestic": _query(cn_q), "international": _query(glb_q)}
+    news = {"domestic": _query_yahoo_news(cn_q), "international": _query_yahoo_news(glb_q)}
+    now_ts = datetime.now(timezone.utc).timestamp()
+    with _NEWS_LOCK:
         _NEWS_CACHE[market_view] = (now_ts, news)
-        return news
-    except Exception:  # noqa: BLE001
-        if cached:
-            return cached[1]
-        return {"domestic": [], "international": []}
+    return news
+
+
+def _fetch_news(market_view: str) -> Dict[str, Any]:
+    """Return cached news immediately; trigger async refresh on stale. Never raises."""
+    now_ts = datetime.now(timezone.utc).timestamp()
+    with _NEWS_LOCK:
+        cached = _NEWS_CACHE.get(market_view)
+        inflight = _NEWS_INFLIGHT.get(market_view, False)
+    if cached and (now_ts - cached[0]) <= _NEWS_TTL:
+        return cached[1]
+    # Schedule non-blocking refresh; serve stale (or empty) immediately.
+    if not inflight:
+        with _NEWS_LOCK:
+            _NEWS_INFLIGHT[market_view] = True
+
+        def _worker() -> None:
+            try:
+                _fetch_news_blocking(market_view)
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                with _NEWS_LOCK:
+                    _NEWS_INFLIGHT[market_view] = False
+
+        threading.Thread(target=_worker, name=f"news-refresh-{market_view}", daemon=True).start()
+    return cached[1] if cached else {"domestic": [], "international": []}
 
 
 def _window(time_window: str) -> int:
     from .risk import parse_time_window
 
     return max(10, parse_time_window(time_window))
+
+
+def _empty_payload(universe_id: str, universe_label: str, market_view: str, time_window: str) -> Dict[str, Any]:
+    liquidity_shell = {
+        "label": "流动性偏好强度",
+        "disclaimer": "基于成交活跃度与收益动量的研究指标（研究用途，存在延迟）。",
+        "top_inflows": [],
+        "top_outflows": [],
+        "universe_turnover_momentum": 0.0,
+        "view": "liquidity_preference",
+    }
+    return {
+        "market_view": market_view,
+        "universe_id": universe_id,
+        "universe_label": universe_label,
+        "time_window": time_window,
+        "indices": [],
+        "top_metrics": [],
+        "signals": {
+            "sector_rotation": {"ranked": [], "strongest": [], "candidate": [], "high_crowding": []},
+            "fund_flows": liquidity_shell,
+            "liquidity_proxy": liquidity_shell,
+            "breadth": {
+                "coverage": 0,
+                "advancers_ratio": 0.0,
+                "decliners_ratio": 0.0,
+                "above_ma20_ratio": 0.0,
+                "above_ma60_ratio": 0.0,
+                "new_high_ratio": 0.0,
+                "new_low_ratio": 0.0,
+                "limit_up": 0,
+                "limit_down": 0,
+                "hotspot_concentration": 0.0,
+                "market_heat": 0.0,
+                "diffusion": 0.0,
+                "advance_decline_ratio": 0.0,
+                "trend_participation": 0.0,
+            },
+            "cross_asset": [],
+            "regime": {"label": "未知", "probability": 0.0, "duration_days": 0, "switch_risk": 0.0},
+            "anomalies": [],
+        },
+        "explanations": [],
+        "news": {"domestic": [], "international": []},
+        "summary": "数据正在准备中，稍后自动刷新。",
+    }
 
 
 def _safe_pct(a: float, b: float) -> float:
@@ -458,7 +525,18 @@ def _explanations(
 def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: str) -> Tuple[Dict[str, Any], Dict[str, Any], int]:
     universe = get_universe(market_view)
     window = _window(time_window)
-    data = adapter.index_price_data(required_symbols_for(market_view))
+    try:
+        data = adapter.index_price_data(required_symbols_for(market_view))
+    except Exception as exc:  # noqa: BLE001
+        # Upstream completely failed — return a schema-valid empty payload
+        # rather than crashing the refresh.
+        meta = adapter.meta(universe=universe.id, fallback_reason=f"upstream_error: {exc}").to_dict()
+        meta["calculation_method_version"] = METHOD_VERSION
+        return _empty_payload(universe.id, universe.label, market_view, time_window), meta, 0
+    if not data:
+        meta = adapter.meta(universe=universe.id, fallback_reason="empty_upstream").to_dict()
+        meta["calculation_method_version"] = METHOD_VERSION
+        return _empty_payload(universe.id, universe.label, market_view, time_window), meta, 0
 
     source_meta = adapter.meta(universe=universe.id).to_dict()
     source_meta["calculation_method_version"] = METHOD_VERSION

@@ -6,6 +6,8 @@ export interface MarketQuery {
   time_window: string;
 }
 
+const MARKET_REQUEST_TIMEOUT_MS = 8000;
+
 const timeoutSignal = (ms: number): AbortSignal => {
   const ctrl = new AbortController();
   setTimeout(() => ctrl.abort(), ms);
@@ -31,8 +33,8 @@ export const marketService = {
   async getOverview(params: MarketQuery, signal?: AbortSignal): Promise<UnwrappedEnvelope<MarketOverview>> {
     const res = await apiClient.get('/api/v1/market/overview', {
       params,
-      signal: mergeSignals(signal, timeoutSignal(3000)),
-      timeout: 3000,
+      signal: mergeSignals(signal, timeoutSignal(MARKET_REQUEST_TIMEOUT_MS)),
+      timeout: MARKET_REQUEST_TIMEOUT_MS,
     });
     return unwrapApiEnvelope<MarketOverview>(res.data);
   },

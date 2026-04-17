@@ -2,6 +2,21 @@
 
 Read path (API): L1 memory -> L2 redis -> L3 sqlite snapshot.
 Write path (scheduler): async refresh jobs -> normalize -> write L3/L2/L1.
+
+Design invariants (2026-04 rewrite)
+-----------------------------------
+1. ``start()`` NEVER blocks the FastAPI startup lifecycle. Initial snapshot
+   warm-up runs in a background task so the HTTP server accepts connections
+   immediately.
+2. ``get_snapshot`` is read-only and always returns in <50ms. If no
+   cache layer has data yet, it enqueues a single-key background refresh
+   (deduplicated by ``_inflight``) and returns ``(None, meta, 'miss')``
+   to the caller; the router turns that into a last-good deterministic
+   fallback so the frontend never sees a timeout.
+3. Per-snapshot refresh uses ``asyncio.wait_for`` with a bounded timeout
+   so a hanging upstream fetch never stalls the refresh cycle.
+4. One bad upstream symbol (e.g. ^HSTECH 404) must not fail the snapshot —
+   that is enforced upstream in ``DataSourceAdapter.index_price_data``.
 """
 
 from __future__ import annotations
@@ -17,16 +32,18 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 from ..analytics.market import build_overview
-from .data_source import get_data_source
+from .data_source import DemoSnapshotAdapter, get_data_source
 
 
 logger = logging.getLogger(__name__)
 
 VIEWS = ("cn_a", "hk", "global")
 WINDOWS = ("5D", "20D", "60D", "120D", "YTD", "1Y")
+
+_REFRESH_TIMEOUT = float(os.getenv("MARKET_REFRESH_TIMEOUT_SECONDS", "12"))
 
 
 @dataclass
@@ -134,7 +151,10 @@ class SQLiteLayer:
             row = cur.fetchone()
         if not row:
             return None
-        return json.loads(row[0]), json.loads(row[1]), float(row[2])
+        try:
+            return json.loads(row[0]), json.loads(row[1]), float(row[2])
+        except Exception:  # noqa: BLE001
+            return None
 
     def set(self, key: str, payload: Dict[str, Any], meta: Dict[str, Any], updated_at: float) -> None:
         with self._lock:
@@ -156,33 +176,85 @@ class MarketSnapshotPipeline:
     def __init__(self) -> None:
         self._l1: Dict[str, Tuple[float, Dict[str, Any], Dict[str, Any], float]] = {}
         self._l1_lock = threading.Lock()
-        self._l1_ttl = float(os.getenv("MARKET_L1_TTL_SECONDS", "10"))
-        self._l2 = RedisLayer(ttl_seconds=int(os.getenv("MARKET_L2_TTL_SECONDS", "90")))
+        self._l1_ttl = float(os.getenv("MARKET_L1_TTL_SECONDS", "15"))
+        self._l2 = RedisLayer(ttl_seconds=int(os.getenv("MARKET_L2_TTL_SECONDS", "120")))
         self._l3 = SQLiteLayer(os.getenv("MARKET_SNAPSHOT_DB", "backend/data/market_snapshots.db"))
         self._stats = PipelineStats()
         self._stats_lock = threading.Lock()
         self._task: Optional[asyncio.Task[None]] = None
+        self._bootstrap_task: Optional[asyncio.Task[None]] = None
         self._stop = asyncio.Event()
-        self._interval = float(os.getenv("MARKET_PIPELINE_INTERVAL_SECONDS", "30"))
-        self._semaphore = asyncio.Semaphore(int(os.getenv("MARKET_PIPELINE_CONCURRENCY", "6")))
+        self._interval = float(os.getenv("MARKET_PIPELINE_INTERVAL_SECONDS", "45"))
+        self._semaphore = asyncio.Semaphore(int(os.getenv("MARKET_PIPELINE_CONCURRENCY", "4")))
+        self._inflight: Set[str] = set()
+        self._inflight_lock = threading.Lock()
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     @staticmethod
     def _key(view: str, window: str, adapter_name: str) -> str:
         return f"market:{view}:{window}:{adapter_name}"
 
     async def start(self) -> None:
+        """Non-blocking startup. Returns immediately; warm-up runs in BG."""
         if self._task and not self._task.done():
             return
         self._stop.clear()
-        await self.refresh_all()
-        self._task = asyncio.create_task(self._loop())
+        self._loop = asyncio.get_running_loop()
+        # Eagerly seed deterministic snapshots so cold reads never return miss.
+        await asyncio.to_thread(self._seed_fallback_snapshots)
+        self._bootstrap_task = asyncio.create_task(self._initial_warmup())
+        self._task = asyncio.create_task(self._loop_task())
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._task:
-            await self._task
+        for t in (self._bootstrap_task, self._task):
+            if t and not t.done():
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
 
-    async def _loop(self) -> None:
+    def _seed_fallback_snapshots(self) -> None:
+        """Compute a deterministic demo snapshot for every (view,window) so the
+        first API call always returns data even if the real upstream is slow
+        or down. Seeding uses DemoSnapshotAdapter directly so it never touches
+        the network and completes in <1s."""
+        adapter_name = get_data_source().name
+        demo = DemoSnapshotAdapter()
+        for view in VIEWS:
+            for window in WINDOWS:
+                key = self._key(view, window, adapter_name)
+                # Skip if L3 already has a real value
+                if self._l3.get(key) is not None:
+                    continue
+                try:
+                    payload, src_meta, ev_count = build_overview(demo, window, view)
+                    src_meta["evidence_count"] = ev_count
+                    src_meta["snapshot_mode"] = "seed"
+                    src_meta["freshness_label"] = "seed"
+                    src_meta["snapshot_updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+                    src_meta["fallback_reason"] = "startup_seed"
+                    stored_at = time.monotonic()
+                    self._l3.set(key, payload, src_meta, stored_at)
+                    with self._l1_lock:
+                        self._l1[key] = (stored_at, payload, src_meta, stored_at)
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("seed snapshot skipped for %s/%s: %s", view, window, exc)
+
+    async def _initial_warmup(self) -> None:
+        try:
+            await self.refresh_all()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("initial warmup failed: %s", exc)
+
+    async def _loop_task(self) -> None:
+        # First cycle: wait a bit to let warmup make progress
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=self._interval)
+            return
+        except asyncio.TimeoutError:
+            pass
         while not self._stop.is_set():
             started = time.perf_counter()
             try:
@@ -202,27 +274,42 @@ class MarketSnapshotPipeline:
         await asyncio.gather(*jobs, return_exceptions=True)
 
     async def _refresh_one(self, adapter_name: str, view: str, window: str) -> None:
-        async with self._semaphore:
-            started = time.perf_counter()
-            try:
-                payload, meta = await asyncio.wait_for(asyncio.to_thread(self._build_snapshot, view, window), timeout=8.0)
-                latency_ms = (time.perf_counter() - started) * 1000
-                meta["snapshot_updated_at"] = datetime.now(tz=timezone.utc).isoformat()
-                meta["snapshot_latency_ms"] = round(latency_ms, 2)
-                stored_at = time.monotonic()
-                key = self._key(view, window, adapter_name)
-                self._l3.set(key, payload, meta, stored_at)
-                self._l2.set(key, payload, meta, stored_at)
-                with self._l1_lock:
-                    self._l1[key] = (stored_at, payload, meta, stored_at)
-                with self._stats_lock:
-                    self._stats.refresh_ok += 1
-                    self._stats.upstream_count += 1
-                    self._stats.upstream_latency_total_ms += latency_ms
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("market snapshot refresh failed for %s/%s: %s", view, window, exc)
-                with self._stats_lock:
-                    self._stats.refresh_failed += 1
+        key = self._key(view, window, adapter_name)
+        with self._inflight_lock:
+            if key in self._inflight:
+                return
+            self._inflight.add(key)
+        try:
+            async with self._semaphore:
+                started = time.perf_counter()
+                try:
+                    payload, meta = await asyncio.wait_for(
+                        asyncio.to_thread(self._build_snapshot, view, window),
+                        timeout=_REFRESH_TIMEOUT,
+                    )
+                    latency_ms = (time.perf_counter() - started) * 1000
+                    meta["snapshot_updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+                    meta["snapshot_latency_ms"] = round(latency_ms, 2)
+                    stored_at = time.monotonic()
+                    self._l3.set(key, payload, meta, stored_at)
+                    self._l2.set(key, payload, meta, stored_at)
+                    with self._l1_lock:
+                        self._l1[key] = (stored_at, payload, meta, stored_at)
+                    with self._stats_lock:
+                        self._stats.refresh_ok += 1
+                        self._stats.upstream_count += 1
+                        self._stats.upstream_latency_total_ms += latency_ms
+                except asyncio.TimeoutError:
+                    logger.info("market snapshot refresh timed out for %s/%s (>%.1fs)", view, window, _REFRESH_TIMEOUT)
+                    with self._stats_lock:
+                        self._stats.refresh_failed += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("market snapshot refresh failed for %s/%s: %s", view, window, exc)
+                    with self._stats_lock:
+                        self._stats.refresh_failed += 1
+        finally:
+            with self._inflight_lock:
+                self._inflight.discard(key)
 
     @staticmethod
     def _build_snapshot(view: str, window: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -232,6 +319,17 @@ class MarketSnapshotPipeline:
         src_meta["snapshot_mode"] = "async_precomputed"
         src_meta["freshness_label"] = "research" if src_meta.get("source_tier") in {"research_only", "derived"} else "delayed"
         return payload, src_meta
+
+    def _schedule_bg_refresh(self, view: str, window: str) -> None:
+        """Fire-and-forget single-key refresh from a sync context."""
+        adapter = get_data_source()
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._refresh_one(adapter.name, view, window), loop)
+        except Exception:  # noqa: BLE001
+            return
 
     def get_snapshot(self, view: str, window: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], str]:
         started = time.perf_counter()
@@ -255,6 +353,7 @@ class MarketSnapshotPipeline:
             with self._stats_lock:
                 self._stats.l2_hits += 1
             self._record_api_latency(started)
+            self._schedule_bg_refresh(view, window)
             return payload, dict(meta), "l2"
 
         l3 = self._l3.get(key)
@@ -266,11 +365,14 @@ class MarketSnapshotPipeline:
             with self._stats_lock:
                 self._stats.l3_hits += 1
             self._record_api_latency(started)
+            self._schedule_bg_refresh(view, window)
             return payload, dict(meta), "l3"
 
         with self._stats_lock:
             self._stats.misses += 1
         self._record_api_latency(started)
+        # Kick off a background refresh so the next call sees populated cache.
+        self._schedule_bg_refresh(view, window)
         return None, {
             "source_name": adapter.name,
             "source_tier": adapter.tier,
