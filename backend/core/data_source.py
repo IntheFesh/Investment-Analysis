@@ -33,6 +33,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -103,7 +104,7 @@ class ResearchRateLimiter:
     causes the pipeline-wide timeouts logged in production."""
 
     _DEFAULTS: Dict[str, float] = {
-        "yahoo": float(os.getenv("YAHOO_RATE_LIMIT_SECONDS", "3.0")),
+        "yahoo": float(os.getenv("YAHOO_RATE_LIMIT_SECONDS", "0.35")),
         "eastmoney": float(os.getenv("EASTMONEY_RATE_LIMIT_SECONDS", "0.25")),
         "sina": float(os.getenv("SINA_RATE_LIMIT_SECONDS", "0.5")),
     }
@@ -466,15 +467,36 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
 
     def _download_yf(self, mapped: List[Tuple[str, str]]) -> Dict[str, pd.DataFrame]:
         out: Dict[str, pd.DataFrame] = {}
+        jobs: Dict[str, List[str]] = {}
         for logical, yf_symbol in mapped:
-            if not yf_symbol:
+            candidates: List[str] = []
+            if yf_symbol:
+                candidates.append(yf_symbol)
+            candidates.extend([c for c in _YF_FALLBACK_MAP.get(logical, []) if c and c not in candidates])
+            if not candidates:
                 continue
-            df = self._yf_single(yf_symbol)
-            if df.empty:
-                self._degraded = True
-                self._degrade_reason = f"missing {logical} from yfinance"
-                continue
-            out[logical] = df
+            jobs[logical] = candidates
+
+        if not jobs:
+            return out
+
+        def _resolve_one(logical: str, candidates: List[str]) -> Tuple[str, pd.DataFrame]:
+            for candidate in candidates:
+                resolved = self._yf_single(candidate)
+                if not resolved.empty:
+                    return logical, resolved
+            return logical, pd.DataFrame()
+
+        max_workers = min(4, max(1, len(jobs)))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_resolve_one, logical, candidates) for logical, candidates in jobs.items()]
+            for fut in as_completed(futures):
+                logical, resolved = fut.result()
+                if resolved.empty:
+                    self._degraded = True
+                    self._degrade_reason = f"missing {logical} from yfinance"
+                    continue
+                out[logical] = resolved
         return out
 
     def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
@@ -538,6 +560,15 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
     }
 
     _EM_TIMEOUT = float(os.getenv("EASTMONEY_TIMEOUT_SECONDS", "3.0"))
+    _EM_PRIORITY = {
+        "000001.SS",
+        "000300.SS",
+        "000905.SS",
+        "000852.SS",
+        "000688.SS",
+        "399001.SZ",
+        "399006.SZ",
+    }
 
     @staticmethod
     def _parse_em_date(raw: str) -> Optional[datetime]:
@@ -676,7 +707,9 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
         out: Dict[str, pd.DataFrame] = {}
         remain: List[str] = []
         for symbol in wanted:
-            if symbol in self._EM_SECID:
+            # Eastmoney is preferred for CN indices only; HK/global symbols
+            # are routed to Yahoo first to avoid repeated empty payloads.
+            if symbol in self._EM_PRIORITY and symbol in self._EM_SECID:
                 try:
                     df = self._eastmoney_kline(symbol)
                     if not df.empty:
