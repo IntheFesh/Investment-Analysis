@@ -11,28 +11,36 @@ export interface MarketQuery {
   time_window: string;
 }
 
-export interface MarketRequestOptions {
-  signal?: AbortSignal;
-}
+const MARKET_REQUEST_TIMEOUT_MS = 8000;
 
-// Market endpoints are served from the backend's hot snapshot cache with
-// a ~3 s internal deadline. A 6 s client-side timeout is more than enough
-// and prevents the old 15 s stalls on view/window switches.
-const MARKET_TIMEOUT_MS = 6000;
+const timeoutSignal = (ms: number): AbortSignal => {
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), ms);
+  return ctrl.signal;
+};
+
+const mergeSignals = (...signals: Array<AbortSignal | undefined>): AbortSignal | undefined => {
+  const valid = signals.filter(Boolean) as AbortSignal[];
+  if (valid.length === 0) return undefined;
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  valid.forEach((s) => {
+    if (s.aborted) {
+      ctrl.abort();
+    } else {
+      s.addEventListener('abort', onAbort, { once: true });
+    }
+  });
+  return ctrl.signal;
+};
 
 export const marketService = {
-  async getOverview(
-    params: MarketQuery,
-    options: MarketRequestOptions = {},
-  ): Promise<UnwrappedEnvelope<MarketOverview>> {
-    const res = await apiClient.get(
-      '/api/v1/market/overview',
-      withRequestConfig({
-        params: params as unknown as Record<string, unknown>,
-        signal: options.signal,
-        timeout: MARKET_TIMEOUT_MS,
-      }),
-    );
+  async getOverview(params: MarketQuery, signal?: AbortSignal): Promise<UnwrappedEnvelope<MarketOverview>> {
+    const res = await apiClient.get('/api/v1/market/overview', {
+      params,
+      signal: mergeSignals(signal, timeoutSignal(MARKET_REQUEST_TIMEOUT_MS)),
+      timeout: MARKET_REQUEST_TIMEOUT_MS,
+    });
     return unwrapApiEnvelope<MarketOverview>(res.data);
   },
 };

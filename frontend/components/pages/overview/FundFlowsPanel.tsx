@@ -9,21 +9,21 @@ interface Props {
 }
 
 export function FundFlowsPanel({ data }: Props) {
-  const combined = [
-    ...data.top_inflows.map((x) => ({ ...x, kind: 'in' as const })),
-    ...data.top_outflows.map((x) => ({ ...x, kind: 'out' as const })),
-  ];
+  // 市场语义：偏强/利好=红色，偏弱/利空=绿色；通过符号翻转与 signedColors 保持一致。
+  const inflow = data.top_inflows.slice(0, 5).map((x) => ({ ...x, value: -Math.abs(x.value), display: x.value }));
+  const outflow = data.top_outflows.slice(0, 5).map((x) => ({ ...x, value: Math.abs(x.value), display: x.value }));
+  const combined = [...inflow, ...outflow].sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
   const categories = combined.map((x) => x.sector);
   const values = combined.map((x) => x.value);
 
   return (
     <Card>
       <CardHeader
-        title="资金偏好（代理成交量 × 板块收益）"
-        subtitle="由 /market/fund-flows 计算；正值代表潜在流入，负值代表流出。单位对齐后端成交量量级。"
+        title="流动性偏好"
+        subtitle="以板块成交活跃度与收益动量构建的偏好强度（偏强=红，偏弱=绿）。"
       />
       {combined.length === 0 ? (
-        <EmptyState compact title="无资金流数据" description="当前窗口内成交量样本不足。" />
+        <EmptyState compact title="无偏好数据" description="当前窗口内样本不足。" />
       ) : (
         <div className="mt-4">
           <BarChart
@@ -31,9 +31,10 @@ export function FundFlowsPanel({ data }: Props) {
             values={values}
             horizontal
             signedColors
-            valueFormatter={(v) => formatCompact(v)}
-            height={260}
+            valueFormatter={(v) => formatCompact(Math.abs(v))}
+            height={280}
           />
+          <div className="mt-3 text-caption text-text-tertiary">{data.disclaimer}</div>
         </div>
       )}
     </Card>

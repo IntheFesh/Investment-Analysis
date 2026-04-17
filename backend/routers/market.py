@@ -1,147 +1,98 @@
-"""Market-overview endpoints (v2).
+"""Market-overview endpoints (cache-first, async-pipeline backed).
 
-Request handling policy
------------------------
-These endpoints are cache-first and never block on external data fetches.
-
-1. Try the hot snapshot cache populated by
-   :mod:`backend.core.market_pipeline`. A fresh or slightly-stale entry is
-   returned immediately (single-digit-ms response time).
-2. On a genuine cold miss, run ``build_overview`` inside a thread with a
-   short deadline (``MARKET_REQUEST_DEADLINE_SECONDS``, default 3 s) so we
-   never propagate upstream timeouts to the frontend.
-3. If even the deadline path fails, return an empty skeleton with
-   ``fallback_reason=warming`` so the UI renders its empty-state rather
-   than 500ing.
-
-A stale entry served from the cache is additionally asked to be
-refreshed by the background pipeline via :func:`schedule_refresh`.
+Read path is strictly cache-first (L1 -> L2 -> L3). On a total miss we
+return a deterministic demo snapshot produced inline so the frontend never
+times out; a background refresh against the real adapter is enqueued by
+``MarketSnapshotPipeline.get_snapshot``.
 """
 
 from __future__ import annotations
 
-import asyncio
-import logging
-import os
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Query
 
 from ..analytics.market import build_overview
-from ..core.data_source import get_data_source
+from ..core.data_source import DemoSnapshotAdapter
 from ..core.envelope import ok
-from ..core.market_pipeline import _cache_key, refresh_one
-from ..core.snapshot_cache import hot_cache
-from ..core.universe import get_universe
+from ..core.market_pipeline import get_market_pipeline
 
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-HOT_TTL = float(os.getenv("MARKET_HOT_TTL_SECONDS", "120"))
-REQUEST_DEADLINE = float(os.getenv("MARKET_REQUEST_DEADLINE_SECONDS", "3"))
-
-
-def _empty_payload(market_view: str, time_window: str, reason: str) -> Dict[str, Any]:
-    universe = get_universe(market_view)
-    return {
-        "market_view": market_view,
-        "universe_id": universe.id,
-        "universe_label": universe.label,
-        "time_window": time_window,
-        "indices": [],
-        "signals": {
-            "sector_rotation": {
-                "ranked": [], "strongest": [], "candidate": [], "high_crowding": [],
-                "method": "composite_sector_score", "method_version": "mkt.v2",
-            },
-            "liquidity_proxy": {
-                "label": "流动性偏好代理",
-                "disclaimer": "缓存预热中，尚无可用数据。",
-                "top_inflows": [], "top_outflows": [],
-                "universe_turnover_momentum": 0.0, "view": "sector_proxy",
-            },
-            "fund_flows": {
-                "label": "流动性偏好代理", "disclaimer": "缓存预热中，尚无可用数据。",
-                "top_inflows": [], "top_outflows": [],
-                "universe_turnover_momentum": 0.0, "view": "liquidity_proxy",
-            },
-            "breadth": {
-                "coverage": 0, "advancers_ratio": 0.0,
-                "above_ma20_ratio": 0.0, "above_ma60_ratio": 0.0,
-                "new_highs_60d": 0, "new_lows_60d": 0, "hotspot_concentration": 0.0,
-                "limit_up": 0, "limit_down": 0, "turnover_change": 0.0, "market_heat": 0.0,
-            },
-            "cross_asset": [],
-        },
-        "explanations": [],
-        "summary": "缓存预热中，请稍候。",
-        "meta_hint": {"calculation_method_version": "mkt.v2", "evidence_count": 0},
-        "_warming": True,
-        "_fallback_reason": reason,
-    }
-
-
-def _empty_meta(reason: str) -> Dict[str, Any]:
-    adapter = get_data_source()
-    m = adapter.meta().to_dict()
-    m["fallback_reason"] = reason
-    m["is_realtime"] = False
-    m["evidence_count"] = 0
-    return m
-
-
-async def _build_with_deadline(market_view: str, time_window: str) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
-    adapter = get_data_source()
+def _inline_demo_overview(market_view: str, time_window: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Synchronous deterministic overview — last-resort fallback (no network)."""
+    demo = DemoSnapshotAdapter()
     try:
-        payload, src_meta, ev_count = await asyncio.wait_for(
-            asyncio.to_thread(build_overview, adapter, time_window, market_view),
-            timeout=REQUEST_DEADLINE,
-        )
-    except asyncio.TimeoutError:
-        logger.info("market request deadline exceeded: %s/%s", market_view, time_window)
-        return None
+        payload, src_meta, ev_count = build_overview(demo, time_window, market_view)
+        src_meta["evidence_count"] = ev_count
+        src_meta["snapshot_mode"] = "inline_demo"
+        src_meta["fallback_reason"] = "snapshot_not_ready"
+        src_meta["freshness_label"] = "fallback"
+        return payload, src_meta
     except Exception as exc:  # noqa: BLE001
-        logger.warning("market on-demand build failed for %s/%s: %s", market_view, time_window, exc)
-        return None
-    src_meta = dict(src_meta)
-    src_meta["evidence_count"] = ev_count
-    return payload, src_meta
+        return (
+            {
+                "market_view": market_view,
+                "time_window": time_window,
+                "universe_id": market_view,
+                "indices": [],
+                "top_metrics": [],
+                "signals": {
+                    "sector_rotation": {"ranked": [], "strongest": [], "candidate": [], "high_crowding": []},
+                    "fund_flows": {"top_inflows": [], "top_outflows": [], "view": "liquidity_preference"},
+                    "liquidity_proxy": {"top_inflows": [], "top_outflows": [], "view": "liquidity_preference"},
+                    "breadth": {
+                        "coverage": 0,
+                        "advancers_ratio": 0.0,
+                        "decliners_ratio": 0.0,
+                        "above_ma20_ratio": 0.0,
+                        "above_ma60_ratio": 0.0,
+                        "new_high_ratio": 0.0,
+                        "new_low_ratio": 0.0,
+                        "limit_up": 0,
+                        "limit_down": 0,
+                        "hotspot_concentration": 0.0,
+                        "market_heat": 0.0,
+                        "diffusion": 0.0,
+                    },
+                    "cross_asset": [],
+                    "regime": {"label": "未知", "probability": 0.0, "duration_days": 0, "switch_risk": 0.0},
+                    "anomalies": [],
+                },
+                "explanations": [],
+                "news": {"domestic": [], "international": []},
+                "summary": "暂无可用快照，正在后台刷新。",
+            },
+            {
+                "source_name": "inline-demo",
+                "source_tier": "fallback_demo",
+                "truth_grade": "E",
+                "is_demo": True,
+                "is_realtime": False,
+                "fallback_reason": f"inline_demo_error: {exc}",
+                "snapshot_mode": "inline_demo",
+            },
+        )
 
 
-def _schedule_background_refresh(market_view: str, time_window: str) -> None:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    asyncio.create_task(refresh_one(market_view, time_window))
+def _get_overview(market_view: str, time_window: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    pipeline = get_market_pipeline()
+    payload, meta, layer = pipeline.get_snapshot(market_view, time_window)
+    out_meta = dict(meta)
+    out_meta["cache_layer"] = layer
+    out_meta["pipeline_stats"] = pipeline.stats()
 
-
-async def _get_overview(market_view: str, time_window: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Return ``(payload, meta)``. Never raises, never blocks on upstream data."""
-    adapter = get_data_source()
-    key = _cache_key(market_view, time_window, adapter.name)
-
-    cached = hot_cache().get_fresh_or_stale(key, ttl=HOT_TTL)
-    if cached is not None:
-        payload, meta, is_stale = cached
-        if is_stale:
-            _schedule_background_refresh(market_view, time_window)
-        return payload, meta
-
-    # Cold cache. Try to build with a short deadline so we don't stall.
-    built = await _build_with_deadline(market_view, time_window)
-    if built is not None:
-        payload, meta = built
-        hot_cache().put(key, payload, meta)
-        return payload, meta
-
-    # Deadline missed — trigger background refresh and hand back a
-    # skeleton so the UI can render its empty states instead of 500.
-    _schedule_background_refresh(market_view, time_window)
-    return _empty_payload(market_view, time_window, "warming"), _empty_meta("warming")
+    if payload is None:
+        pipeline.register_fallback_served()
+        payload, demo_meta = _inline_demo_overview(market_view, time_window)
+        out_meta.update({k: v for k, v in demo_meta.items() if v is not None})
+        out_meta["cache_layer"] = "inline_demo"
+        out_meta["is_realtime"] = False
+        out_meta.setdefault("fallback_reason", "snapshot_not_ready")
+    return payload, out_meta
 
 
 @router.get("/overview")
@@ -159,31 +110,31 @@ async def market_overview(
 
 @router.get("/indices")
 async def indices(time_window: str = Query("20D"), market_view: str = Query("cn_a")) -> Dict[str, Any]:
-    payload, meta = await _get_overview(market_view, time_window)
+    payload, meta = _get_overview(market_view, time_window)
     return ok(payload.get("indices", []), meta=meta)
 
 
 @router.get("/sector-rotation")
 async def sector_rotation(time_window: str = Query("20D"), market_view: str = Query("cn_a")) -> Dict[str, Any]:
-    payload, meta = await _get_overview(market_view, time_window)
+    payload, meta = _get_overview(market_view, time_window)
     return ok(payload.get("signals", {}).get("sector_rotation", {}), meta=meta)
 
 
 @router.get("/fund-flows")
 async def fund_flows(time_window: str = Query("20D"), market_view: str = Query("cn_a")) -> Dict[str, Any]:
-    payload, meta = await _get_overview(market_view, time_window)
+    payload, meta = _get_overview(market_view, time_window)
     return ok(payload.get("signals", {}).get("liquidity_proxy", {}), meta=meta)
 
 
 @router.get("/breadth")
 async def breadth(time_window: str = Query("20D"), market_view: str = Query("cn_a")) -> Dict[str, Any]:
-    payload, meta = await _get_overview(market_view, time_window)
+    payload, meta = _get_overview(market_view, time_window)
     return ok(payload.get("signals", {}).get("breadth", {}), meta=meta)
 
 
 @router.get("/cross-asset")
 async def cross_asset(time_window: str = Query("20D"), market_view: str = Query("cn_a")) -> Dict[str, Any]:
-    payload, meta = await _get_overview(market_view, time_window)
+    payload, meta = _get_overview(market_view, time_window)
     return ok(payload.get("signals", {}).get("cross_asset", []), meta=meta)
 
 
@@ -191,9 +142,6 @@ async def cross_asset(time_window: str = Query("20D"), market_view: str = Query(
 async def explanations(time_window: str = Query("20D"), market_view: str = Query("cn_a")) -> Dict[str, Any]:
     payload, meta = await _get_overview(market_view, time_window)
     return ok(
-        {
-            "explanations": payload.get("explanations", []),
-            "summary": payload.get("summary", ""),
-        },
+        {"explanations": payload.get("explanations", []), "summary": payload.get("summary", "")},
         meta=meta,
     )

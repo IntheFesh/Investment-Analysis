@@ -11,7 +11,7 @@ const DEFAULT_TIMEOUT_MS = 8000;
 
 export const apiClient = axios.create({
   baseURL: apiBaseUrl,
-  timeout: DEFAULT_TIMEOUT_MS,
+  timeout: 10000,
 });
 
 const parseAxiosError = (error: AxiosError): ApiError => {

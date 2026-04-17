@@ -87,9 +87,13 @@ export default function SettingsPage() {
 
   const liquidityOptions = useMemo(
     () =>
-      (enums?.liquidity_preferences ?? ['low', 'mid', 'high']).map((id) => ({
-        value: id,
-        label: { low: '低换手', mid: '中等', high: '高流动性' }[id] ?? id,
+      (enums?.liquidity_preferences ?? [
+        { id: 'low', label_zh: '可接受低流动性' },
+        { id: 'mid', label_zh: '平衡流动性' },
+        { id: 'high', label_zh: '高流动性' },
+      ]).map((item) => ({
+        value: item.id,
+        label: item.label_zh,
       })),
     [enums],
   );

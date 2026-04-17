@@ -18,7 +18,7 @@ from fastapi.responses import JSONResponse
 
 from .core.data_source import get_data_source
 from .core.envelope import build_meta
-from .core.market_pipeline import seed_demo_snapshots, start_pipeline, stop_pipeline
+from .core.market_pipeline import get_market_pipeline
 from .core.scheduler import register_default_jobs
 from .routers import (
     backtest,
@@ -68,20 +68,12 @@ app.include_router(scheduler.router, prefix="/api/v1/scheduler", tags=["schedule
 @app.on_event("startup")
 async def _on_startup() -> None:
     register_default_jobs()
-    # Prime the hot cache with a deterministic snapshot for every
-    # (market_view, time_window) slot so the very first request never
-    # races the external vendor. The async pipeline then upgrades those
-    # slots in the background.
-    try:
-        seed_demo_snapshots()
-    except Exception:  # noqa: BLE001
-        logging.getLogger(__name__).exception("seed_demo_snapshots failed")
-    start_pipeline()
+    await get_market_pipeline().start()
 
 
 @app.on_event("shutdown")
 async def _on_shutdown() -> None:
-    stop_pipeline()
+    await get_market_pipeline().stop()
 
 
 @app.exception_handler(Exception)

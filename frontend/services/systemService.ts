@@ -64,7 +64,7 @@ export interface BootstrapEnums {
   research_modes: string[];
   themes: string[];
   export_formats: string[];
-  liquidity_preferences: string[];
+  liquidity_preferences: Array<{ id: string; label_zh: string }>;
 }
 
 export interface DataSourceInfo {
