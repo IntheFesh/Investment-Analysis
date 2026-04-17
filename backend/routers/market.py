@@ -143,7 +143,6 @@ async def market_overview(
     fields: Optional[List[str]] = Query(None),
 ) -> Dict[str, Any]:
     payload, meta = _get_overview(market_view, time_window)
-    payload, meta = await _upgrade_live_if_needed(market_view, time_window, payload, meta)
     if fields:
         keep = set(fields) | {"market_view", "time_window", "universe_id"}
         payload = {k: v for k, v in payload.items() if k in keep}
@@ -183,7 +182,6 @@ async def cross_asset(time_window: str = Query("20D"), market_view: str = Query(
 @router.get("/explanations")
 async def explanations(time_window: str = Query("20D"), market_view: str = Query("cn_a")) -> Dict[str, Any]:
     payload, meta = _get_overview(market_view, time_window)
-    payload, meta = await _upgrade_live_if_needed(market_view, time_window, payload, meta)
     return ok(
         {"explanations": payload.get("explanations", []), "summary": payload.get("summary", "")},
         meta=meta,
