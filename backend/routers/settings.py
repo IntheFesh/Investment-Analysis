@@ -1,87 +1,69 @@
-"""
-Settings router: endpoints to retrieve and update user preferences and risk profile.
+"""Settings endpoints: risk profile + preferences.
 
-These endpoints manage per‑user configuration such as risk tolerance, investment
-horizon and default display preferences.  In a real implementation the settings
-would be stored in a database keyed by the authenticated user.
+Values are held in an in-memory dict keyed by a static ``default`` user; this
+is the right shape for a local / demo deployment without auth. Swap for a
+database-backed store once identity is wired in.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from ..core.data_source import get_data_source
+from ..core.envelope import ok
+
 
 router = APIRouter()
 
 
 class RiskProfile(BaseModel):
-    risk_type: str
-    investment_horizon: str
-    defensive_ratio: Optional[float] = None
-    offensive_ratio: Optional[float] = None
+    risk_type: str = Field(..., description="保守型 | 平衡型 | 进攻型")
+    investment_horizon: str = Field("3Y")
+    defensive_ratio: Optional[float] = 0.4
+    offensive_ratio: Optional[float] = 0.6
+    questionnaire_score: Optional[int] = None
 
 
 class Preferences(BaseModel):
-    market_view: str
-    time_window: str
-    research_mode: str
-    default_export_format: list[str]
+    market_view: str = "cn_a"
+    time_window: str = "20D"
+    research_mode: str = "research"
+    theme: str = "dark"
+    default_export_format: List[str] = Field(default_factory=lambda: ["JSON", "Markdown"])
+    include_global_events: bool = True
+    include_charts_in_export: bool = True
+
+
+_STORE: Dict[str, Any] = {
+    "profile": RiskProfile(risk_type="平衡型", investment_horizon="3Y", defensive_ratio=0.4, offensive_ratio=0.6).model_dump(),
+    "preferences": Preferences().model_dump(),
+}
 
 
 @router.get("/profile")
-async def get_risk_profile() -> Dict[str, Any]:
-    """Return the current risk profile settings (placeholder)."""
-    timestamp = datetime.now(tz=timezone.utc).isoformat()
-    profile = RiskProfile(risk_type="平衡型", investment_horizon="3Y", defensive_ratio=0.4, offensive_ratio=0.6)
-    return {
-        "success": True,
-        "message": "ok",
-        "data": profile.dict(),
-        "meta": {"timestamp": timestamp, "version": "v1"},
-    }
+async def get_profile() -> Dict[str, Any]:
+    adapter = get_data_source()
+    return ok(_STORE["profile"], meta=adapter.meta())
 
 
 @router.put("/profile")
-async def update_risk_profile(profile: RiskProfile = Body(...)) -> Dict[str, Any]:
-    """Update the risk profile settings (placeholder)."""
-    timestamp = datetime.now(tz=timezone.utc).isoformat()
-    # In a real implementation we would persist the updated profile here
-    return {
-        "success": True,
-        "message": "ok",
-        "data": profile.dict(),
-        "meta": {"timestamp": timestamp, "version": "v1"},
-    }
+async def update_profile(profile: RiskProfile = Body(...)) -> Dict[str, Any]:
+    adapter = get_data_source()
+    _STORE["profile"] = profile.model_dump()
+    return ok(_STORE["profile"], meta=adapter.meta())
 
 
 @router.get("/preferences")
 async def get_preferences() -> Dict[str, Any]:
-    """Return the current user preferences (placeholder)."""
-    timestamp = datetime.now(tz=timezone.utc).isoformat()
-    prefs = Preferences(
-        market_view="A股主视角",
-        time_window="20D",
-        research_mode="轻量模式",
-        default_export_format=["JSON", "Markdown"],
-    )
-    return {
-        "success": True,
-        "message": "ok",
-        "data": prefs.dict(),
-        "meta": {"timestamp": timestamp, "version": "v1"},
-    }
+    adapter = get_data_source()
+    return ok(_STORE["preferences"], meta=adapter.meta())
 
 
 @router.put("/preferences")
 async def update_preferences(prefs: Preferences = Body(...)) -> Dict[str, Any]:
-    """Update user preferences (placeholder)."""
-    timestamp = datetime.now(tz=timezone.utc).isoformat()
-    return {
-        "success": True,
-        "message": "ok",
-        "data": prefs.dict(),
-        "meta": {"timestamp": timestamp, "version": "v1"},
-    }
+    adapter = get_data_source()
+    _STORE["preferences"] = prefs.model_dump()
+    return ok(_STORE["preferences"], meta=adapter.meta())

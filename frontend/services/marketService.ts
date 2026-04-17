@@ -1,8 +1,14 @@
-import { apiClient, unwrapApiData } from '@/lib/apiClient';
+import { apiClient, unwrapApiEnvelope, type UnwrappedEnvelope } from '@/lib/apiClient';
+import type { MarketOverview } from './types';
+
+export interface MarketQuery {
+  market_view: string;
+  time_window: string;
+}
 
 export const marketService = {
-  async getOverview(params: { market_view: string; time_window: string }) {
+  async getOverview(params: MarketQuery): Promise<UnwrappedEnvelope<MarketOverview>> {
     const res = await apiClient.get('/api/v1/market/overview', { params });
-    return unwrapApiData(res.data);
+    return unwrapApiEnvelope<MarketOverview>(res.data);
   },
 };

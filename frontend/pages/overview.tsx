@@ -1,50 +1,51 @@
-import { useQuery } from '@tanstack/react-query';
-import Layout from '@/components/Layout';
-import QueryErrorState from '@/components/QueryErrorState';
-import { useAppContext } from '@/context/AppContext';
-import { marketService } from '@/services/marketService';
-
-interface MarketData {
-  indices: { symbol: string; name: string; last: number; change_percent: number; turnover: number }[];
-  summary: string;
-}
+import { Layout } from '@/components/shell/Layout';
+import { ExportButton } from '@/components/shell/ExportButton';
+import { useMarketOverview } from '@/hooks/useMarket';
+import { IndicesPanel } from '@/components/pages/overview/IndicesPanel';
+import { SectorRotationPanel } from '@/components/pages/overview/SectorRotationPanel';
+import { FundFlowsPanel } from '@/components/pages/overview/FundFlowsPanel';
+import { BreadthPanel } from '@/components/pages/overview/BreadthPanel';
+import { ExplanationsPanel } from '@/components/pages/overview/ExplanationsPanel';
+import { SkeletonChart } from '@/components/ui/Skeleton';
+import { ErrorState } from '@/components/ui/ErrorState';
 
 export default function OverviewPage() {
-  const { marketView, timeWindow } = useAppContext();
-  const { data, isLoading, error } = useQuery(
-    ['market-overview', marketView, timeWindow],
-    () => marketService.getOverview({ market_view: marketView, time_window: timeWindow }) as Promise<MarketData>,
-    { staleTime: 60 * 1000 }
-  );
+  const { data, isLoading, error, refetch } = useMarketOverview();
+  const meta = data?.meta;
+  const overview = data?.data;
 
   return (
-    <Layout>
-      <h1 className="text-2xl font-bold mb-4">市场总览</h1>
-      {isLoading && <p>加载中…</p>}
-      {error && <QueryErrorState error={error} />}
-      {data && (
-        <div className="space-y-8">
-          <section>
-            <h2 className="text-xl font-semibold mb-2">主要指数</h2>
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-              {data.indices.map((idx) => (
-                <div key={idx.symbol} className="p-3 border rounded-md bg-white dark:bg-gray-800 shadow-sm">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-medium">{idx.name}</span>
-                    <span>{idx.change_percent}%</span>
-                  </div>
-                  <div className="text-sm">最新: {idx.last}</div>
-                  <div className="text-sm">成交额: {idx.turnover}</div>
-                </div>
-              ))}
-            </div>
-          </section>
-          <section>
-            <h2 className="text-xl font-semibold mb-2">今日摘要</h2>
-            <p className="text-sm">{data.summary}</p>
-          </section>
+    <Layout
+      title="市场总览"
+      subtitle="统一视角下的指数、板块轮动、资金偏好、广度与自动解读。所有数值来源于后端 /api/v1/market/overview。"
+      meta={meta}
+      actions={<ExportButton page="overview" />}
+    >
+      {isLoading && !overview ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <SkeletonChart />
+          <SkeletonChart />
+          <SkeletonChart />
+          <SkeletonChart />
         </div>
-      )}
+      ) : error ? (
+        <ErrorState error={error} onRetry={() => refetch()} />
+      ) : overview ? (
+        <>
+          <IndicesPanel indices={overview.indices} />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <SectorRotationPanel data={overview.signals.sector_rotation} />
+            <FundFlowsPanel data={overview.signals.fund_flows} />
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <BreadthPanel data={overview.signals.breadth} />
+            <ExplanationsPanel
+              explanations={overview.explanations}
+              summary={overview.summary}
+            />
+          </div>
+        </>
+      ) : null}
     </Layout>
   );
 }

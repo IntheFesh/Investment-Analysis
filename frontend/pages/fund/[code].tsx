@@ -1,27 +1,57 @@
 import { useRouter } from 'next/router';
-import { useQuery } from '@tanstack/react-query';
-import Layout from '@/components/Layout';
-import QueryErrorState from '@/components/QueryErrorState';
-import { fundService } from '@/services/fundService';
+import Link from 'next/link';
+import { Layout } from '@/components/shell/Layout';
+import { SkeletonChart } from '@/components/ui/Skeleton';
+import { ErrorState } from '@/components/ui/ErrorState';
+import { Button } from '@/components/ui/Button';
+import { useFundOverview, useFundAnalysis } from '@/hooks/useFund';
+import { FundSummary } from '@/components/pages/fund/FundSummary';
+import { FundAnalysisPanels } from '@/components/pages/fund/FundAnalysisPanels';
 
 export default function FundDetailPage() {
   const router = useRouter();
-  const { code } = router.query as { code: string };
+  const rawCode = router.query.code;
+  const code = typeof rawCode === 'string' ? rawCode : '';
 
-  const overviewQuery = useQuery(['fund-overview', code], () => fundService.getOverview(code), { enabled: !!code, staleTime: 2 * 60 * 1000 });
-  const analysisQuery = useQuery(['fund-analysis', code], () => fundService.getAnalysis(code), { enabled: !!code, staleTime: 2 * 60 * 1000 });
+  const overview = useFundOverview(code);
+  const analysis = useFundAnalysis(code);
+
+  const meta = overview.data?.meta ?? analysis.data?.meta;
 
   return (
-    <Layout>
-      {(!code || overviewQuery.isLoading || analysisQuery.isLoading) && <p>加载中…</p>}
-      {overviewQuery.error && <QueryErrorState error={overviewQuery.error} />}
-      {analysisQuery.error && <QueryErrorState error={analysisQuery.error} />}
-      {overviewQuery.data && analysisQuery.data && (
-        <div>
-          <h1 className="text-2xl font-bold mb-2">{(overviewQuery.data as any).name}（{(overviewQuery.data as any).code}）</h1>
-          <pre className="text-xs">{JSON.stringify(analysisQuery.data, null, 2)}</pre>
+    <Layout
+      title={overview.data?.data.name ?? '基金详情'}
+      subtitle={code ? `代码 ${code}` : '正在解析路由参数…'}
+      meta={meta}
+      actions={
+        <Link href="/fund">
+          <Button variant="ghost" size="sm">返回基金池</Button>
+        </Link>
+      }
+    >
+      {!code ? (
+        <SkeletonChart height={200} />
+      ) : overview.isLoading && !overview.data ? (
+        <div className="grid grid-cols-1 gap-4">
+          <SkeletonChart height={160} />
+          <SkeletonChart height={260} />
         </div>
-      )}
+      ) : overview.error ? (
+        <ErrorState error={overview.error} onRetry={() => overview.refetch()} />
+      ) : overview.data ? (
+        <FundSummary data={overview.data.data} />
+      ) : null}
+
+      {analysis.isLoading && !analysis.data ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <SkeletonChart height={280} />
+          <SkeletonChart height={280} />
+        </div>
+      ) : analysis.error ? (
+        <ErrorState error={analysis.error} onRetry={() => analysis.refetch()} />
+      ) : analysis.data ? (
+        <FundAnalysisPanels data={analysis.data.data} />
+      ) : null}
     </Layout>
   );
 }
