@@ -86,6 +86,11 @@ def _get_overview(market_view: str, time_window: str) -> Tuple[Dict[str, Any], D
     out_meta = dict(meta)
     out_meta["cache_layer"] = layer
     out_meta["pipeline_stats"] = pipeline.stats()
+    out_meta.setdefault("cache_hit", layer in {"l1", "l2", "l3"})
+    # Surface the upstream vendor name where known (the pipeline stamps
+    # ``source_name`` but the new ``source_vendor`` field is what the
+    # frontend freshness badge keys off; fall back to source_name).
+    out_meta.setdefault("source_vendor", out_meta.get("source_name"))
 
     if payload is None:
         pipeline.register_fallback_served()
@@ -93,7 +98,9 @@ def _get_overview(market_view: str, time_window: str) -> Tuple[Dict[str, Any], D
         out_meta.update({k: v for k, v in demo_meta.items() if v is not None})
         out_meta["cache_layer"] = "inline_demo"
         out_meta["is_realtime"] = False
+        out_meta["fallback_used"] = True
         out_meta.setdefault("fallback_reason", "snapshot_not_ready")
+        out_meta.setdefault("degraded_reason", "ERR_SNAPSHOT_NOT_READY")
     return payload, out_meta
 
 

@@ -2,6 +2,7 @@
 
 from . import (  # noqa: F401
     backtest,
+    debug,
     export_api,
     fund,
     import_api,
@@ -28,4 +29,5 @@ __all__ = [
     "tasks",
     "backtest",
     "scheduler",
+    "debug",
 ]

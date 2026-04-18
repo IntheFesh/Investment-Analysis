@@ -34,15 +34,21 @@ export type LicenseScope = 'commercial' | 'research_only' | 'internal_preview';
 export type MarketSession = 'pre' | 'open' | 'close' | 'after' | 'snapshot';
 
 export type FreshnessLabel = 'realtime' | 'delayed' | 'research' | 'stale' | 'seed' | 'fallback';
-export type CacheLayer = 'l1' | 'l2' | 'l3' | 'inline_demo' | 'miss';
+export type CacheLayer = 'l1' | 'l2' | 'l3' | 'inline_demo' | 'miss' | 'request_live';
+export type EnvelopeStatus = 'success' | 'partial' | 'degraded' | 'failed';
+export type MarketPhase = 'open' | 'closed' | 'holiday' | 'preopen' | 'postclose' | 'snapshot';
 
 export interface ApiMeta {
   timestamp?: string;
   version?: string;
   computed_at?: string;
+  schema_version?: string;
+  trace_id?: string;
+  latency_ms?: number | null;
 
   // truth metadata
   source_name?: string;
+  source_vendor?: string | null;
   source_tier?: SourceTier;
   truth_grade?: TruthGrade;
   is_demo?: boolean;
@@ -51,16 +57,20 @@ export interface ApiMeta {
   delay_seconds?: number;
   license_scope?: LicenseScope;
   fallback_reason?: string | null;
+  fallback_used?: boolean;
+  degraded_reason?: string | null;
   trading_day?: string | null;
   coverage_universe?: string;
   calculation_method_version?: string;
   evidence_count?: number;
   market_session?: MarketSession;
+  market_phase?: MarketPhase | null;
   tz?: string;
 
   // freshness metadata (pipeline-injected)
   freshness_label?: FreshnessLabel;
   cache_layer?: CacheLayer;
+  cache_hit?: boolean;
   is_stale?: boolean;
   age_seconds?: number;
   partial?: boolean;
@@ -77,6 +87,8 @@ export interface ApiMeta {
 
 export interface ApiEnvelope<T> {
   success: boolean;
+  /** Coarse status — new in Round 0. Legacy responses may omit this. */
+  status?: EnvelopeStatus;
   message: string;
   data: T;
   meta?: ApiMeta;

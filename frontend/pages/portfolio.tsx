@@ -29,12 +29,15 @@ export default function PortfolioPage() {
   const activeQuery =
     tab === 'overview' ? overview : tab === 'diagnosis' ? diagnosis : exportPack;
   const meta = activeQuery.data?.meta ?? overview.data?.meta;
+  const status = activeQuery.data?.status ?? overview.data?.status;
 
   return (
     <Layout
       title="基金组合"
       subtitle="穿透单持仓、结构性诊断、AI 导出包——三视图一套组合数据。"
       meta={meta}
+      status={status}
+      showSourceFootnote
       actions={<ExportButton page="portfolio" portfolioId={overview.data?.data.portfolio_id ?? null} />}
     >
       <Tabs value={tab} onChange={setTab} items={TABS} />

@@ -21,6 +21,7 @@ export default function OverviewPage() {
   const [timeWindow, setTimeWindow] = useState<string>('20D');
   const { data, isLoading, error, refetch } = useMarketOverview(timeWindow);
   const meta = data?.meta;
+  const status = data?.status;
   const overview = data?.data;
 
   const showDetailedPanels = researchMode !== 'light';
@@ -30,6 +31,8 @@ export default function OverviewPage() {
       title="市场总览"
       subtitle="指数、板块轮动、资金偏好、广度与自动解读；每条结论可展开追溯。"
       meta={meta}
+      status={status}
+      showSourceFootnote
       actions={
         <div className="flex items-center gap-2">
           <TimeWindowSelector

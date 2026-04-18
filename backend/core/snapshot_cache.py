@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -32,12 +34,27 @@ logger = logging.getLogger(__name__)
 # event loop and lets the request handler race it against a deadline.
 _REBUILD_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="snapshot-rebuild")
 
+# Jitter fraction applied to TTL to avoid thundering-herd invalidations.
+# Entries expire at ``base_ttl * (1 + jitter_frac * uniform(-1, 1))``.
+_TTL_JITTER_FRAC = float(os.getenv("SNAPSHOT_CACHE_JITTER_FRAC", "0.10"))
+
+
+def _jitter_ttl(base_ttl: float) -> float:
+    if _TTL_JITTER_FRAC <= 0:
+        return base_ttl
+    frac = max(0.0, min(0.5, _TTL_JITTER_FRAC))
+    # Floor at 1ms so jittered TTL never collapses to zero; we do NOT
+    # impose a "sanity" floor (like 0.1s) because tests and short-lived
+    # deadlines legitimately use sub-second TTLs.
+    return max(0.001, base_ttl * (1.0 + random.uniform(-frac, frac)))
+
 
 @dataclass
 class CacheEntry:
     value: Any
     meta: Dict[str, Any]
     computed_at: float
+    effective_ttl: float = 0.0
     is_stale: bool = False
 
 
@@ -60,10 +77,15 @@ class SnapshotCache:
             age = time.monotonic() - entry.computed_at
             return entry.value, dict(entry.meta), age
 
-    def put(self, key: str, value: Any, meta: Dict[str, Any]) -> None:
+    def put(self, key: str, value: Any, meta: Dict[str, Any], *, ttl: Optional[float] = None) -> None:
+        effective = _jitter_ttl(ttl if ttl is not None else self._ttl)
         with self._lock:
             self._entries[key] = CacheEntry(
-                value=value, meta=dict(meta), computed_at=time.monotonic(), is_stale=False
+                value=value,
+                meta=dict(meta),
+                computed_at=time.monotonic(),
+                effective_ttl=effective,
+                is_stale=False,
             )
 
     def get(
@@ -83,13 +105,16 @@ class SnapshotCache:
         now = time.monotonic()
         with self._lock:
             entry = self._entries.get(key)
-            if entry and (now - entry.computed_at) <= ttl_s and not entry.is_stale:
+            if entry and (now - entry.computed_at) <= entry.effective_ttl and not entry.is_stale:
                 return entry.value, self._stamp_age(entry, now, was_cache_hit=True), True
 
         try:
             value, meta = rebuild()
+            effective = _jitter_ttl(ttl_s)
             with self._lock:
-                self._entries[key] = CacheEntry(value=value, meta=meta, computed_at=now, is_stale=False)
+                self._entries[key] = CacheEntry(
+                    value=value, meta=meta, computed_at=now, effective_ttl=effective, is_stale=False,
+                )
             return value, self._stamp_fresh(meta), False
         except Exception as exc:  # noqa: BLE001
             logger.warning("snapshot rebuild failed for %s: %s", key, exc)
@@ -122,7 +147,8 @@ class SnapshotCache:
             if entry is None:
                 return None
             age = time.monotonic() - entry.computed_at
-            is_stale = age > ttl_s or entry.is_stale
+            budget = entry.effective_ttl or ttl_s
+            is_stale = age > budget or entry.is_stale
             return entry.value, dict(entry.meta), is_stale
 
     def get_with_deadline(
@@ -143,7 +169,7 @@ class SnapshotCache:
         now = time.monotonic()
         with self._lock:
             entry = self._entries.get(key)
-            cached_fresh = entry and (now - entry.computed_at) <= ttl_s and not entry.is_stale
+            cached_fresh = entry and (now - entry.computed_at) <= entry.effective_ttl and not entry.is_stale
         if cached_fresh and entry is not None:
             return entry.value, self._stamp_age(entry, now, was_cache_hit=True), True
 
@@ -151,7 +177,9 @@ class SnapshotCache:
         # deadline may still return the last-good value.
         with self._lock:
             if key not in self._inflight:
-                self._inflight[key] = _REBUILD_POOL.submit(self._rebuild_and_store, key, rebuild)
+                self._inflight[key] = _REBUILD_POOL.submit(
+                    self._rebuild_and_store, key, rebuild, ttl_s,
+                )
             future = self._inflight[key]
         try:
             value, meta = future.result(timeout=deadline_seconds)
@@ -183,12 +211,18 @@ class SnapshotCache:
         self,
         key: str,
         rebuild: Callable[[], Tuple[Any, Dict[str, Any]]],
+        base_ttl: Optional[float] = None,
     ) -> Tuple[Any, Dict[str, Any]]:
         try:
             value, meta = rebuild()
+            effective = _jitter_ttl(base_ttl if base_ttl is not None else self._ttl)
             with self._lock:
                 self._entries[key] = CacheEntry(
-                    value=value, meta=meta, computed_at=time.monotonic(), is_stale=False
+                    value=value,
+                    meta=meta,
+                    computed_at=time.monotonic(),
+                    effective_ttl=effective,
+                    is_stale=False,
                 )
             return value, meta
         finally:
@@ -211,6 +245,50 @@ class SnapshotCache:
         out["is_stale"] = False
         out["cache_hit"] = False
         return out
+
+    def swr_get_or_rebuild(
+        self,
+        key: str,
+        *,
+        ttl: Optional[float] = None,
+        rebuild: Callable[[], Tuple[Any, Dict[str, Any]]],
+    ) -> Tuple[Optional[Any], Optional[Dict[str, Any]], str]:
+        """Stale-while-revalidate read.
+
+        Returns ``(value, meta, state)`` where ``state`` is one of:
+
+        - ``"fresh"``   — cache within TTL, no rebuild scheduled.
+        - ``"stale"``   — cache past TTL; a background rebuild has been
+                          scheduled and the stale value is returned now.
+        - ``"miss"``    — nothing cached yet; ``value`` is ``None`` and the
+                          caller should decide whether to block on rebuild
+                          or return an explicit ``snapshot_not_ready``.
+        - ``"rebuild"`` — stale with a rebuild already in flight; stale
+                          value returned.
+
+        Never blocks on the rebuild. The background future populates the
+        cache for the next caller.
+        """
+        ttl_s = ttl if ttl is not None else self._ttl
+        now = time.monotonic()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is not None:
+                age = now - entry.computed_at
+                if age <= entry.effective_ttl and not entry.is_stale:
+                    return entry.value, self._stamp_age(entry, now, was_cache_hit=True), "fresh"
+            # Past-TTL or missing → schedule rebuild (singleflight).
+            in_flight = key in self._inflight
+            if not in_flight:
+                self._inflight[key] = _REBUILD_POOL.submit(
+                    self._rebuild_and_store, key, rebuild, ttl_s,
+                )
+        if entry is not None:
+            stale_meta = self._stamp_age(entry, now, was_cache_hit=True)
+            stale_meta["is_stale"] = True
+            stale_meta["fallback_reason"] = "swr_background_refresh"
+            return entry.value, stale_meta, "rebuild" if in_flight else "stale"
+        return None, None, "miss"
 
     def invalidate(self, key: str) -> None:
         with self._lock:
