@@ -435,30 +435,77 @@ def _breadth(universe: UniverseConfig, data: Dict[str, pd.DataFrame], window: in
 
 
 def _liquidity_preference(sector_scored: List[Dict[str, Any]]) -> Dict[str, Any]:
-    ranked = sorted(
-        sector_scored,
-        key=lambda x: 0.55 * x["components"].get("turnover_surge", 0.0)
-        + 0.45 * x["components"].get("rolling_momentum", 0.0),
-        reverse=True,
+    """Z-normalised composite of turnover surge (1-day volume vs 20d avg) and
+    rolling momentum (3-month return).
+
+    The previous implementation mixed the two at raw scale — ``turnover_surge``
+    is a ratio centred around 1 while ``rolling_momentum`` is a small signed
+    number — so the composite was dominated by volume noise. We now:
+
+    1. Z-score each component across the sector universe so scales align.
+    2. Combine with 0.55 / 0.45 weights in *z-space* (comparable units).
+    3. Summarise with ``universe_turnover_momentum`` = mean(top-5) − mean(bot-5),
+       i.e. the strong-minus-weak spread, which is a signed number that
+       actually moves with the rotation (up-biased / down-biased).
+    """
+    if not sector_scored:
+        return {
+            "label": "流动性偏好强度",
+            "disclaimer": "基于成交活跃度与收益动量的研究指标（研究用途，存在延迟）。",
+            "top_inflows": [],
+            "top_outflows": [],
+            "universe_turnover_momentum": 0.0,
+            "composite_method": "z_weighted_spread",
+            "view": "liquidity_preference",
+        }
+
+    surges = np.asarray(
+        [float(x["components"].get("turnover_surge", 0.0)) for x in sector_scored], dtype=float
+    )
+    mom = np.asarray(
+        [float(x["components"].get("rolling_momentum", 0.0)) for x in sector_scored], dtype=float
     )
 
-    def _as_item(it: Dict[str, Any]) -> Dict[str, Any]:
-        pref = 0.55 * it["components"].get("turnover_surge", 0.0) + 0.45 * it["components"].get("rolling_momentum", 0.0)
+    def _z(v: np.ndarray) -> np.ndarray:
+        std = float(np.nanstd(v))
+        if not np.isfinite(std) or std < 1e-9:
+            return np.zeros_like(v)
+        return (v - float(np.nanmean(v))) / std
+
+    z_surge = _z(surges)
+    z_mom = _z(mom)
+    composite = 0.55 * z_surge + 0.45 * z_mom
+
+    indexed = list(enumerate(sector_scored))
+    indexed.sort(key=lambda pair: float(composite[pair[0]]), reverse=True)
+
+    def _as_item(idx_item: Tuple[int, Dict[str, Any]]) -> Dict[str, Any]:
+        idx, it = idx_item
+        pref = float(composite[idx])
         return {
             "sector": it["sector"],
             "value": round(pref, 3),
             "strength": round(it.get("score", 50.0), 2),
             "note": it.get("note"),
+            "components": {
+                "turnover_z": round(float(z_surge[idx]), 3),
+                "momentum_z": round(float(z_mom[idx]), 3),
+            },
         }
 
-    top = [_as_item(x) for x in ranked[:5]]
-    tail = [_as_item(x) for x in ranked[-5:]]
+    top = [_as_item(x) for x in indexed[:5]]
+    tail = [_as_item(x) for x in indexed[-5:]]
+    top_mean = float(np.mean([x["value"] for x in top])) if top else 0.0
+    bot_mean = float(np.mean([x["value"] for x in tail])) if tail else 0.0
+    spread = top_mean - bot_mean
+
     return {
         "label": "流动性偏好强度",
-        "disclaimer": "基于成交活跃度与收益动量的研究指标（研究用途，存在延迟）。",
+        "disclaimer": "基于成交活跃度 z 分数与动量 z 分数的加权指标（研究用途，存在延迟）。",
         "top_inflows": top,
         "top_outflows": list(reversed(tail)),
-        "universe_turnover_momentum": round(float(np.mean([x["value"] for x in top])) if top else 0.0, 3),
+        "universe_turnover_momentum": round(spread, 3),
+        "composite_method": "z_weighted_spread",
         "view": "liquidity_preference",
     }
 
@@ -736,7 +783,16 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
         {"label": "上涨家数占比", "value": breadth["advancers_ratio"], "unit": "%", "tone": "up" if breadth["advancers_ratio"] >= 0.5 else "down"},
         {"label": "市场广度ADR", "value": breadth["advancers_ratio"] / max(0.05, breadth["decliners_ratio"]), "unit": "", "tone": "neutral"},
         {"label": "波动热度", "value": breadth["market_heat"], "unit": "%", "tone": "neutral"},
-        {"label": "流动性偏好", "value": liquidity.get("universe_turnover_momentum", 0.0), "unit": "", "tone": "down" if liquidity.get("universe_turnover_momentum", 0.0) > 0 else "up"},
+        {
+            "label": "流动性偏好",
+            "value": liquidity.get("universe_turnover_momentum", 0.0),
+            "unit": "",
+            "tone": (
+                "up" if liquidity.get("universe_turnover_momentum", 0.0) > 0.15
+                else "down" if liquidity.get("universe_turnover_momentum", 0.0) < -0.15
+                else "neutral"
+            ),
+        },
     ]
 
     summary = f"{universe.label}处于{regime['label']}状态（概率{regime['probability']*100:.0f}%）；广度上涨占比{breadth['advancers_ratio']*100:.1f}%，热点集中度{breadth['hotspot_concentration']*100:.1f}%。"

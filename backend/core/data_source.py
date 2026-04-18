@@ -104,15 +104,16 @@ class ResearchRateLimiter:
     causes the pipeline-wide timeouts logged in production."""
 
     _DEFAULTS: Dict[str, float] = {
-        # Yahoo is the tightest so we default lower than before — with
-        # Eastmoney/Tencent handling the bulk of the load, the fallback
-        # Yahoo path only needs to cover a handful of residual macro
-        # tickers and no longer needs a 3s wall that starves the refresh
-        # cycle.
-        "yahoo": float(os.getenv("YAHOO_RATE_LIMIT_SECONDS", "1.2")),
+        # AkShare wraps Eastmoney / Sina public endpoints — the vendor asks
+        # for responsible pacing; 0.6s/call is well within the implicit
+        # budget and still finishes a 7-symbol warmup in ~4s.
+        "akshare": float(os.getenv("AKSHARE_RATE_LIMIT_SECONDS", "0.6")),
         "eastmoney": float(os.getenv("EASTMONEY_RATE_LIMIT_SECONDS", "0.25")),
         "tencent": float(os.getenv("TENCENT_RATE_LIMIT_SECONDS", "0.35")),
         "sina": float(os.getenv("SINA_RATE_LIMIT_SECONDS", "0.5")),
+        # Yahoo is kept for back-compat with the ``yfinance`` adapter name
+        # only; HybridMarketResearchAdapter no longer routes through it.
+        "yahoo": float(os.getenv("YAHOO_RATE_LIMIT_SECONDS", "3.0")),
     }
 
     def __init__(self, default_interval_seconds: float = 3.0) -> None:
@@ -529,14 +530,41 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
 
 
 class HybridMarketResearchAdapter(YFinanceResearchAdapter):
-    """优先 Eastmoney 指数接口（A 股/港股/美股主指数），其余走 yfinance；
-    单 symbol 失败互不影响，缺失项回退到确定性快照并标记为 fallback。"""
+    """AkShare 优先（真数据）→ Eastmoney → Tencent → 合成；Yahoo 已停用。
+
+    AkShare 通过东方财富 / 新浪的公开 HTTP 接口抓取真实行情，覆盖 A 股 /
+    港股 / 美股主指数；Eastmoney / Tencent 为二级回退。一旦 AkShare 能
+    返回数据，``_degraded`` 保持为 False，envelope 将不再出现 fallback
+    标识。"""
 
     name = "hybrid-research"
     tier = "research_only"
     truth_grade = "C"
     license_scope = "research_only"
     delay_seconds = 900
+
+    # AkShare 指数代码映射 — 真数据主源
+    _AK_CN_SYMBOL: Dict[str, str] = {
+        "000001.SS": "sh000001",
+        "000300.SS": "sh000300",
+        "000905.SS": "sh000905",
+        "000852.SS": "sh000852",
+        "000688.SS": "sh000688",
+        "399001.SZ": "sz399001",
+        "399006.SZ": "sz399006",
+    }
+    _AK_HK_SYMBOL: Dict[str, str] = {
+        "HSI":    "HSI",
+        "HSTECH": "HSTECF2L",
+        "HSCEI":  "HSCEI",
+    }
+    _AK_US_SYMBOL: Dict[str, str] = {
+        "SPX": ".INX",
+        "NDX": ".NDX",
+        "DJI": ".DJI",
+        "IXIC": ".IXIC",
+    }
+    _AK_TIMEOUT = float(os.getenv("AKSHARE_TIMEOUT_SECONDS", "4.0"))
 
     _cache_ttl = float(os.getenv("EASTMONEY_CACHE_TTL", "60"))
     _cache_lock = threading.Lock()
@@ -627,6 +655,122 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
                 return dt
             return None
         return None
+
+    _akshare_module: Any = None
+    _akshare_import_failed: bool = False
+
+    @classmethod
+    def _get_akshare(cls) -> Any:
+        if cls._akshare_module is not None:
+            return cls._akshare_module
+        if cls._akshare_import_failed:
+            return None
+        try:
+            import akshare as ak  # type: ignore
+
+            cls._akshare_module = ak
+            return ak
+        except Exception as exc:  # noqa: BLE001
+            cls._akshare_import_failed = True
+            logger.warning("akshare unavailable (%s); falling back to eastmoney/tencent", exc)
+            return None
+
+    def _akshare_kline(self, symbol: str) -> pd.DataFrame:
+        """Real daily kline via AkShare (东方财富/新浪). Returns empty on error.
+
+        Covers A股 (sh*/sz*), 港股 (HSI/HSTECH/HSCEI), 美股 (.INX/.NDX/.DJI/.IXIC).
+        Result cached for ``_cache_ttl`` seconds so repeat calls inside the
+        refresh cycle don't re-hit the upstream.
+        """
+        ak = self._get_akshare()
+        if ak is None:
+            return pd.DataFrame()
+
+        key = f"ak:{symbol}"
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._cache.get(key)
+            if cached and (now - cached[0]) <= self._cache_ttl:
+                return cached[1].copy()
+
+        research_limiter().wait("akshare")
+        raw: Optional[pd.DataFrame] = None
+        try:
+            if symbol in self._AK_CN_SYMBOL:
+                raw = ak.stock_zh_index_daily_em(symbol=self._AK_CN_SYMBOL[symbol])
+            elif symbol in self._AK_HK_SYMBOL:
+                raw = ak.stock_hk_index_daily_em(symbol=self._AK_HK_SYMBOL[symbol])
+            elif symbol in self._AK_US_SYMBOL:
+                raw = ak.index_us_stock_sina(symbol=self._AK_US_SYMBOL[symbol])
+            else:
+                return pd.DataFrame()
+        except Exception as exc:  # noqa: BLE001
+            logger.info("akshare fetch failed for %s: %s", symbol, exc)
+            return pd.DataFrame()
+
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+
+        # Normalize to the common (Date index, OHLCV) schema expected by the
+        # analytics layer. AkShare index endpoints return columns that vary
+        # slightly (``date``/``日期``); we map both.
+        df = raw.copy()
+        col_map: Dict[str, str] = {}
+        for col in df.columns:
+            low = str(col).strip().lower()
+            if low in {"date", "日期", "交易日期"}:
+                col_map[col] = "Date"
+            elif low in {"open", "开盘"}:
+                col_map[col] = "Open"
+            elif low in {"high", "最高"}:
+                col_map[col] = "High"
+            elif low in {"low", "最低"}:
+                col_map[col] = "Low"
+            elif low in {"close", "收盘"}:
+                col_map[col] = "Close"
+            elif low in {"volume", "成交量"}:
+                col_map[col] = "Volume"
+            elif low in {"amount", "成交额"}:
+                col_map[col] = "Amount"
+        df = df.rename(columns=col_map)
+        required = {"Date", "Open", "High", "Low", "Close"}
+        if not required.issubset(df.columns):
+            logger.info("akshare %s schema mismatch: cols=%s", symbol, list(df.columns))
+            return pd.DataFrame()
+        if "Volume" not in df.columns:
+            df["Volume"] = 0.0
+        df["Adj Close"] = df["Close"]
+        for col in ("Open", "High", "Low", "Close", "Adj Close", "Volume"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["Close"])
+
+        # Date can be a plain 'YYYY-MM-DD' string or pd.Timestamp. Use the
+        # strict helper to dodge any platform time_t edge case.
+        def _coerce(v: Any) -> Optional[datetime]:
+            if isinstance(v, datetime):
+                return v if 1900 <= v.year <= 2100 else None
+            return self._parse_em_date(str(v))
+
+        df["Date"] = df["Date"].map(_coerce)
+        df = df.dropna(subset=["Date"])
+        if df.empty:
+            return pd.DataFrame()
+        try:
+            df["Date"] = pd.DatetimeIndex(df["Date"])
+            df = df.set_index("Date").sort_index()
+            df.index.name = "Date"
+        except Exception as exc:  # noqa: BLE001
+            logger.info("akshare frame build failed for %s: %s", symbol, exc)
+            return pd.DataFrame()
+
+        # Keep the last ~520 trading days; matches Eastmoney/Tencent windows
+        # so analytics that take tail(252) behave identically across sources.
+        if len(df) > 520:
+            df = df.tail(520)
+
+        with self._cache_lock:
+            self._cache[key] = (now, df.copy())
+        return df
 
     def _eastmoney_kline(self, symbol: str) -> pd.DataFrame:
         secid = self._EM_SECID.get(symbol)
@@ -837,9 +981,21 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
     def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
         wanted = symbols or list(required_symbols_for("cn_a"))
         out: Dict[str, pd.DataFrame] = {}
-        remain: List[str] = []
+
+        def _has_ak(sym: str) -> bool:
+            return sym in self._AK_CN_SYMBOL or sym in self._AK_HK_SYMBOL or sym in self._AK_US_SYMBOL
+
         for symbol in wanted:
-            # First: Eastmoney
+            # 1. AkShare (真数据主源)
+            if _has_ak(symbol):
+                try:
+                    df = self._akshare_kline(symbol)
+                    if not df.empty:
+                        out[symbol] = df
+                        continue
+                except Exception as exc:  # noqa: BLE001
+                    logger.info("akshare unexpected error for %s: %s", symbol, exc)
+            # 2. Eastmoney push2his (回退)
             if symbol in self._EM_SECID:
                 try:
                     df = self._eastmoney_kline(symbol)
@@ -848,7 +1004,7 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
                         continue
                 except Exception as exc:  # noqa: BLE001
                     logger.info("eastmoney unexpected error for %s: %s", symbol, exc)
-            # Second: Tencent (handles empty-payload case for A/HK/US indices)
+            # 3. Tencent qt (最后网络回退)
             if symbol in self._TX_SECID:
                 try:
                     df = self._tencent_kline(symbol)
@@ -857,14 +1013,6 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
                         continue
                 except Exception as exc:  # noqa: BLE001
                     logger.info("tencent unexpected error for %s: %s", symbol, exc)
-            remain.append(symbol)
-
-        # Third: Yahoo for residual symbols (macro/forex rarely available elsewhere)
-        yf_pairs = [(logical, self._YF_SYMBOL_MAP.get(logical, "")) for logical in remain]
-        yf_data = self._download_yf([(l, y) for l, y in yf_pairs if y])
-        for k, v in yf_data.items():
-            if k not in out and not v.empty:
-                out[k] = v
 
         # Final safety net: fabricate deterministic OHLCV for symbols that remain
         # missing so the analytics pipeline can always complete. This is marked

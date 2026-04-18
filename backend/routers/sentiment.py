@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from fastapi import APIRouter, Query
 
+from ..analytics.greed import build_greed_index
 from ..analytics.sentiment import build_empty_payload, build_overview
 from ..core.data_source import get_data_source
 from ..core.envelope import ok
@@ -18,6 +19,8 @@ router = APIRouter()
 
 _SENTIMENT_DEADLINE = float(os.getenv("SENTIMENT_READ_DEADLINE_SECONDS", "4.0"))
 _SENTIMENT_TTL = float(os.getenv("SENTIMENT_CACHE_TTL", "60.0"))
+_GREED_DEADLINE = float(os.getenv("GREED_READ_DEADLINE_SECONDS", "4.0"))
+_GREED_TTL = float(os.getenv("GREED_CACHE_TTL", "60.0"))
 
 
 def _sentiment_key(market_view: str, time_window: str, adapter_name: str) -> str:
@@ -81,3 +84,44 @@ async def sentiment_snapshot_light(
         }),
     }
     return ok(slim, meta=meta)
+
+
+def _read_greed(market_view: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    adapter = get_data_source()
+    key = f"greed:{market_view}:{adapter.name}"
+
+    def rebuild():
+        payload, src_meta = build_greed_index(adapter, market_view)
+        return payload, src_meta
+
+    try:
+        payload, meta, _ = hot_cache().get_with_deadline(
+            key, ttl=_GREED_TTL, deadline_seconds=_GREED_DEADLINE, rebuild=rebuild,
+        )
+        return payload, meta
+    except Exception as exc:  # noqa: BLE001
+        empty_payload = {
+            "market_view": market_view,
+            "score": 50.0,
+            "state": "neutral",
+            "state_label": "中性",
+            "as_of": None,
+            "components": {
+                "volume": {"score": 50.0, "weight": 0.5, "evidence": {"reason": "unavailable"}},
+                "breadth": {"score": 50.0, "weight": 0.5, "evidence": {"reason": "unavailable"}},
+            },
+            "method_version": "greed.v1",
+        }
+        empty_meta = adapter.meta(universe=market_view, fallback_reason=f"greed_unavailable: {exc}").to_dict()
+        empty_meta["partial"] = True
+        empty_meta["is_stale"] = True
+        return empty_payload, empty_meta
+
+
+@router.get("/greed-index")
+async def sentiment_greed_index(
+    market_view: str = Query("cn_a"),
+) -> Dict[str, Any]:
+    """A 股贪婪指数（初版）——成交量 + 涨跌家数合成 0-100 分。"""
+    payload, meta = _read_greed(market_view)
+    return ok(payload, meta=meta)
