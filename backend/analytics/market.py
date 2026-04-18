@@ -51,46 +51,91 @@ def _safe_ts_to_str(ts: Any) -> str:
         return ""
 
 
-def _query_yahoo_news(q: str, count: int = 5) -> List[Dict[str, Any]]:
-    url = "https://query1.finance.yahoo.com/v1/finance/search?" + urllib.parse.urlencode({"q": q, "newsCount": count})
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=_NEWS_TIMEOUT) as resp:  # nosec B310
-            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
-    except Exception:  # noqa: BLE001
-        return []
-    rows = payload.get("news") or []
-    out: List[Dict[str, Any]] = []
-    for item in rows:
-        provider = item.get("publisher") or ""
-        out.append(
-            {
-                "title": str(item.get("title") or "").strip(),
-                "source": str(provider).strip(),
-                "url": str(item.get("link") or "").strip(),
-                "published_at": _safe_ts_to_str(item.get("providerPublishTime")),
-                "lang": "en",
-            }
-        )
-    return [x for x in out if x["title"] and x["url"]][:count]
+# ---------------------------------------------------------------------------
+# News pipeline — Chinese-language only.
+#
+# Both the 国内 and 国际 columns on the overview page are sourced from
+# mainland-Chinese platforms (primarily 东方财富; 新浪财经 as a fallback) so
+# every headline is Chinese regardless of the market the story is about.
+# Items are ranked by an ``importance`` score (keyword hits + recency)
+# instead of raw publish-time order, matching the request for "重要的新的"
+# coverage rather than the very latest headline wire.
+# ---------------------------------------------------------------------------
 
 
-def _query_eastmoney_news(channel: str, count: int = 5) -> List[Dict[str, Any]]:
+# Keyword → weight. These cover central-bank / macro shocks, mergers, big
+# market moves, listings, and policy announcements. The keyword list is
+# intentionally small — we'd rather miss a minor boost than over-weight the
+# wrong story.
+_IMPORTANCE_KEYWORDS: Dict[str, float] = {
+    "美联储": 3.0, "联储": 2.5, "降息": 3.0, "加息": 3.0, "缩表": 2.0,
+    "央行": 2.5, "人行": 2.0, "政治局": 2.5, "国常会": 2.5,
+    "重磅": 2.5, "突发": 3.0, "紧急": 2.5, "警示": 1.5, "熔断": 4.0,
+    "暴跌": 2.5, "暴涨": 2.5, "崩盘": 3.0, "回购": 1.5, "增持": 1.5,
+    "减持": 1.5, "IPO": 1.5, "上市": 1.0, "退市": 2.0, "停牌": 1.5,
+    "复牌": 1.0, "并购": 2.0, "收购": 2.0, "合并": 1.5, "重组": 2.0,
+    "业绩": 1.2, "财报": 1.2, "年报": 1.2, "预告": 1.0,
+    "关税": 2.5, "制裁": 2.5, "地缘": 1.8, "战争": 2.5, "冲突": 1.8,
+    "油价": 1.5, "金价": 1.2, "汇率": 1.5, "人民币": 1.5,
+}
+
+
+def _score_importance(item: Dict[str, Any], now_ts: float) -> float:
+    """Score a news item for editorial importance.
+
+    Combines:
+    - keyword hits in title (weighted)
+    - recency boost (published in last 6h) with a linear decay over 24h
+    - source-tier bonus (东方财富/新浪财经/财联社 > generic aggregators)
+    """
+    title = str(item.get("title") or "")
+    score = 0.0
+    # Keyword hits — count per keyword, cap to avoid runaway scores.
+    hits = 0
+    for kw, w in _IMPORTANCE_KEYWORDS.items():
+        if kw in title:
+            score += w
+            hits += 1
+            if hits >= 5:
+                break
+    # Recency: parse "YYYY-MM-DD HH:MM" (Eastmoney format) to a rough delta.
+    pub = str(item.get("published_at") or "")
+    if len(pub) >= 16:
+        try:
+            dt = datetime.strptime(pub[:16], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            age_h = max(0.0, (now_ts - dt.timestamp()) / 3600.0)
+            if age_h <= 6:
+                score += 2.0
+            elif age_h <= 24:
+                score += max(0.0, 2.0 * (1.0 - (age_h - 6) / 18.0))
+        except (ValueError, OverflowError):
+            pass
+    # Source tier
+    src = str(item.get("source") or "")
+    if any(k in src for k in ("东方财富", "财联社", "新华", "人民日报", "证券时报")):
+        score += 0.5
+    elif "新浪" in src:
+        score += 0.3
+    return score
+
+
+def _query_eastmoney_news(channel: str, count: int = 8) -> List[Dict[str, Any]]:
     """Fetch Chinese-language headlines from Eastmoney's public JSON feed.
 
-    ``channel`` selects the board (``stock`` A-share, ``hk`` Hong Kong,
-    ``global`` overseas). Used as a backup when Yahoo is unreachable or
-    irrelevant (Chinese headlines for domestic markets).
+    Channels (all return Chinese-language content):
+      - ``stock`` → 102  A 股要闻
+      - ``hk``    → 114  港股
+      - ``global``→ 110  海外宏观 (Chinese reporting on overseas markets)
     """
     board_map = {
-        "stock": "102",   # A股要闻
-        "hk": "114",      # 港股
-        "global": "110",  # 海外宏观
+        "stock": "102",
+        "hk": "114",
+        "global": "110",
     }
     code = board_map.get(channel, "102")
     url = (
         "https://np-listapi.eastmoney.com/comm/web/getListInfo?"
-        + urllib.parse.urlencode({"client": "web", "mTypeAndCode": code, "type": "1", "pageSize": max(count, 6)})
+        + urllib.parse.urlencode({"client": "web", "mTypeAndCode": code, "type": "1", "pageSize": max(count, 10)})
     )
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.eastmoney.com/"})
     try:
@@ -121,27 +166,92 @@ def _query_eastmoney_news(channel: str, count: int = 5) -> List[Dict[str, Any]]:
     return out[:count]
 
 
-def _fetch_news_blocking(market_view: str) -> Dict[str, Any]:
-    topics = {
-        "cn_a": ("A股 上证 深证 宏观政策", "global markets fed nasdaq bond", "stock", "global"),
-        "hk":   ("港股 恒生 科技指数 南向资金", "global markets fed nasdaq bond", "hk", "global"),
-        "global": ("中国经济 A股 港股", "global markets fed nasdaq bond oil dollar", "stock", "global"),
+def _query_sina_news(channel: str, count: int = 8) -> List[Dict[str, Any]]:
+    """Secondary Chinese source — Sina Finance rolling news JSON.
+
+    Used as a fallback when Eastmoney is unreachable. Sina's feed covers
+    both domestic and international macro in Chinese. ``channel`` maps to
+    ``lid`` (list id):
+      - ``stock``  → 2509  (财经要闻)
+      - ``hk``     → 2516  (港股)
+      - ``global`` → 2515  (国际财经)
+    """
+    lid_map = {
+        "stock": "2509",
+        "hk": "2516",
+        "global": "2515",
     }
-    cn_q, glb_q, cn_board, glb_board = topics.get(market_view, topics["cn_a"])
-    # Prefer Chinese source for domestic headlines; fall back to Yahoo if empty.
-    domestic = _query_eastmoney_news(cn_board, count=5)
-    if not domestic:
-        domestic = _query_yahoo_news(cn_q, count=5)
-    international = _query_yahoo_news(glb_q, count=5)
-    if not international:
-        international = _query_eastmoney_news(glb_board, count=5)
+    lid = lid_map.get(channel, "2509")
+    url = (
+        "https://feed.mix.sina.com.cn/api/roll/get?"
+        + urllib.parse.urlencode({"pageid": "153", "lid": lid, "num": max(count, 10), "versionNumber": "1.2.4"})
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"})
+    try:
+        with urllib.request.urlopen(req, timeout=_NEWS_TIMEOUT) as resp:  # nosec B310
+            payload = json.loads(resp.read().decode("utf-8", errors="ignore"))
+    except Exception:  # noqa: BLE001
+        return []
+    rows = (((payload.get("result") or {}).get("data") or []) if isinstance(payload, dict) else []) or []
+    out: List[Dict[str, Any]] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        link = str(item.get("url") or "").strip()
+        src = str(item.get("media_name") or item.get("source") or "新浪财经").strip()
+        pub = _safe_ts_to_str(item.get("ctime") or item.get("mtime"))
+        if not title or not link:
+            continue
+        out.append({"title": title, "source": src, "url": link, "published_at": pub, "lang": "zh"})
+    return out[:count]
+
+
+def _rank_news(rows: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any]]:
+    """Dedupe by title, score by importance, return top_k."""
+    if not rows:
+        return []
+    now_ts = datetime.now(timezone.utc).timestamp()
+    seen: set = set()
+    uniq: List[Dict[str, Any]] = []
+    for r in rows:
+        t = str(r.get("title") or "")
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        r = dict(r)
+        r["importance"] = round(_score_importance(r, now_ts), 2)
+        uniq.append(r)
+    uniq.sort(key=lambda x: (-float(x.get("importance", 0.0)), -len(x.get("published_at") or "")))
+    return uniq[:top_k]
+
+
+def _fetch_news_blocking(market_view: str) -> Dict[str, Any]:
+    # Both 国内 and 国际 pull from Chinese platforms.
+    #   - 国内: Eastmoney 102 (A-share) or 114 (HK) depending on the view,
+    #           with Sina 财经要闻 as the fallback.
+    #   - 国际: Eastmoney 110 (海外宏观) + Sina 国际财经 — both Chinese
+    #           reporting on overseas markets.
+    cn_channel = {"cn_a": "stock", "hk": "hk", "global": "stock"}.get(market_view, "stock")
+    # 国内 candidates — concat both primary + Sina fallback, then rank/dedupe.
+    dom_rows = _query_eastmoney_news(cn_channel, count=8)
+    if len(dom_rows) < 5:
+        dom_rows.extend(_query_sina_news(cn_channel, count=8))
+    # 国际 candidates — Eastmoney 110 first, then Sina international, both
+    # Chinese-language so the frontend never shows English titles again.
+    intl_rows = _query_eastmoney_news("global", count=8)
+    if len(intl_rows) < 5:
+        intl_rows.extend(_query_sina_news("global", count=8))
+    domestic = _rank_news(dom_rows, top_k=5)
+    international = _rank_news(intl_rows, top_k=5)
     news = {
         "domestic": domestic,
         "international": international,
         "sources_tried": {
-            "domestic": ["eastmoney", "yahoo"],
-            "international": ["yahoo", "eastmoney"],
+            "domestic": ["eastmoney:" + cn_channel, "sina:" + cn_channel],
+            "international": ["eastmoney:global", "sina:global"],
         },
+        "ranking": "importance_desc",
     }
     now_ts = datetime.now(timezone.utc).timestamp()
     with _NEWS_LOCK:
@@ -435,6 +545,7 @@ def _breadth(universe: UniverseConfig, data: Dict[str, pd.DataFrame], window: in
 
 
 def _liquidity_preference(sector_scored: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # Rank by a blend of turnover surge (flow) and momentum (price).
     ranked = sorted(
         sector_scored,
         key=lambda x: 0.55 * x["components"].get("turnover_surge", 0.0)
@@ -451,8 +562,22 @@ def _liquidity_preference(sector_scored: List[Dict[str, Any]]) -> Dict[str, Any]
             "note": it.get("note"),
         }
 
-    top = [_as_item(x) for x in ranked[:5]]
-    tail = [_as_item(x) for x in ranked[-5:]]
+    # Split the ranked list into strict halves so the same sector never
+    # appears in both the inflow and outflow columns of the chart. With 6–8
+    # baskets that means top_k = outflow_k = len/2 (rounded down).
+    n = len(ranked)
+    if n == 0:
+        top, tail = [], []
+    else:
+        half = max(1, n // 2)
+        # Up to 5 on each side, but never overlap: cap by half.
+        k = min(5, half)
+        top = [_as_item(x) for x in ranked[:k]]
+        tail = [_as_item(x) for x in ranked[n - k:]]
+        # Belt-and-braces dedupe by sector name in case upstream delivered
+        # duplicate sector labels (legacy baskets, merge bugs, etc.).
+        top_names = {t["sector"] for t in top}
+        tail = [x for x in tail if x["sector"] not in top_names]
     return {
         "label": "流动性偏好强度",
         "disclaimer": "基于成交活跃度与收益动量的研究指标（研究用途，存在延迟）。",
@@ -650,6 +775,50 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
         "fallback_demo": "回退",
     }.get(source_meta.get("source_tier"), "研究")
 
+    market_ret = _market_return(data, universe.headline_indices, window)
+    global_lead = _market_return(data, ["SPX", "HSI", "NDX"], window)
+
+    total_turnover = 0.0
+    for b in universe.sector_baskets:
+        d = data.get(b.proxy_symbol)
+        if d is not None and not d.empty:
+            total_turnover += float((d["Adj Close"].tail(window) * d["Volume"].tail(window)).mean())
+
+    sector_scored: List[Dict[str, Any]] = []
+    for b in universe.sector_baskets:
+        d = data.get(b.proxy_symbol)
+        if d is None or d.empty:
+            continue
+        sector_scored.append(_enhanced_sector_score(b, d, market_ret, window, total_turnover, global_lead))
+
+    # Cross-sector summaries attached to each index card. Same ranking for
+    # every index in the view (sector_scored is universe-level), but each
+    # index gets its own ``basis`` (annualized vol) and its own
+    # ``leaders`` slice (best/worst sector by window return).
+    sector_by_strength = sorted(
+        sector_scored,
+        key=lambda x: x["components"].get("relative_strength", 0.0),
+        reverse=True,
+    )
+    top_contribs = [
+        {"name": s["sector"], "value": round(float(s["components"].get("relative_strength", 0.0)), 4)}
+        for s in sector_by_strength[:3]
+    ]
+    sector_by_momentum = sorted(
+        sector_scored,
+        key=lambda x: x["components"].get("rolling_momentum", 0.0),
+        reverse=True,
+    )
+    top_leader = sector_by_momentum[:2]
+    bottom_leader = sector_by_momentum[-1:] if len(sector_by_momentum) >= 3 else []
+    leaders_rows = [
+        {
+            "name": s["sector"],
+            "change_percent": round(float(s["components"].get("rolling_momentum", 0.0)) * 100.0, 2),
+        }
+        for s in top_leader + bottom_leader
+    ]
+
     indices: List[Dict[str, Any]] = []
     for symbol in universe.headline_indices + universe.supporting_indices:
         df = data.get(symbol)
@@ -668,6 +837,13 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
 
         turnover_amt = float((close.iloc[-1] * vol.iloc[-1]))
 
+        # Per-index annualized vol over the display window; substitutes the
+        # futures "基差" field we can't source on the free tier. Expressed
+        # as a fraction (0.18 = 18%) so the frontend's formatPercent(v*100)
+        # renders it correctly.
+        win_ret = close.pct_change().dropna().tail(window)
+        annualized_vol = float(win_ret.std() * np.sqrt(252)) if len(win_ret) >= 3 else 0.0
+
         indices.append(
             {
                 "symbol": symbol,
@@ -684,9 +860,9 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
                     "pe_percentile": round(_rolling_rank(close.pct_change().rolling(20).mean().dropna()) * 100, 1),
                     "pb_percentile": round(_rolling_rank(close.pct_change().rolling(60).mean().dropna()) * 100, 1),
                 },
-                "contributors": [],
-                "basis": {"name": "数据状态", "value": 0.0},
-                "leaders": [],
+                "contributors": top_contribs,
+                "basis": {"name": f"{window}日年化波幅", "value": round(annualized_vol, 4)},
+                "leaders": leaders_rows,
                 "as_of": df.index[-1].strftime("%Y-%m-%d %H:%M"),
                 "role": "headline" if symbol in universe.headline_indices else "support",
                 "data_quality": {
@@ -696,22 +872,6 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
                 },
             }
         )
-
-    market_ret = _market_return(data, universe.headline_indices, window)
-    global_lead = _market_return(data, ["SPX", "HSI", "NDX"], window)
-
-    total_turnover = 0.0
-    for b in universe.sector_baskets:
-        d = data.get(b.proxy_symbol)
-        if d is not None and not d.empty:
-            total_turnover += float((d["Adj Close"].tail(window) * d["Volume"].tail(window)).mean())
-
-    sector_scored: List[Dict[str, Any]] = []
-    for b in universe.sector_baskets:
-        d = data.get(b.proxy_symbol)
-        if d is None or d.empty:
-            continue
-        sector_scored.append(_enhanced_sector_score(b, d, market_ret, window, total_turnover, global_lead))
 
     sector_scored.sort(key=lambda x: x["score"], reverse=True)
     for i, s in enumerate(sector_scored):

@@ -61,7 +61,7 @@ export function NewsPanel({ domestic, international, status, ageSeconds }: Props
     <Card>
       <CardHeader
         title="重大新闻热点"
-        subtitle="实时更新的市场相关资讯，按国内 / 国际拆分（国内优先东方财富，国际优先 Yahoo）。"
+        subtitle="国内外资讯均取自东方财富、新浪财经等国内平台（中文标题），按重要度（关键词 + 时效）排序。"
       />
       {badge ? (
         <div className={`text-micro mt-1 ${badge.tone}`}>{badge.label}</div>

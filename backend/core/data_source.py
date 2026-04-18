@@ -225,6 +225,23 @@ class DemoSnapshotAdapter(DataSourceAdapter):
         "HSCEI":  (6100.0, 0.016, -0.00008),
         "NDX":    (18500.0, 0.012, 0.00030),
         "SPX":    (5250.0, 0.009, 0.00022),
+        "DJI":    (39500.0, 0.008, 0.00018),
+        "RUT":    (2050.0, 0.014, 0.00011),
+        # A-share sector ETFs (deterministic fallback params)
+        "512480.SS": (0.95, 0.022, 0.00008),
+        "515030.SS": (0.78, 0.021, 0.00004),
+        "512170.SS": (0.42, 0.018, 0.00003),
+        "515170.SS": (0.65, 0.016, 0.00010),
+        "512880.SS": (0.95, 0.020, 0.00006),
+        "512660.SS": (1.05, 0.019, 0.00007),
+        "512200.SS": (0.80, 0.017, 0.00002),
+        # US SPDR sector ETFs
+        "XLK": (220.0, 0.013, 0.00028),
+        "XLF": (45.0, 0.010, 0.00015),
+        "XLE": (92.0, 0.016, 0.00012),
+        "XLV": (145.0, 0.010, 0.00014),
+        "XLY": (185.0, 0.013, 0.00019),
+        "XLI": (130.0, 0.011, 0.00016),
         "VIX":    (15.0, 0.040, 0.0),
         "DXY":    (104.5, 0.006, 0.0),
         "US10Y":  (4.3, 0.010, 0.0),
@@ -400,12 +417,29 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
         "HSI": "^HSI",
         "NDX": "^NDX",
         "SPX": "^GSPC",
+        "DJI": "^DJI",
+        "RUT": "^RUT",
         "VIX": "^VIX",
         "BRENT": "BZ=F",
         "GOLD": "GC=F",
         "DXY": "DX-Y.NYB",
         "US10Y": "^TNX",
         "CNH": "CNH=X",
+        # A-share sector ETFs (Yahoo covers all SH-listed ETFs via .SS suffix)
+        "512480.SS": "512480.SS",
+        "515030.SS": "515030.SS",
+        "512170.SS": "512170.SS",
+        "515170.SS": "515170.SS",
+        "512880.SS": "512880.SS",
+        "512660.SS": "512660.SS",
+        "512200.SS": "512200.SS",
+        # US SPDR sector ETFs
+        "XLK": "XLK",
+        "XLF": "XLF",
+        "XLE": "XLE",
+        "XLV": "XLV",
+        "XLY": "XLY",
+        "XLI": "XLI",
     }
 
     _YF_TIMEOUT = float(os.getenv("YF_TIMEOUT_SECONDS", "2.0"))
@@ -553,6 +587,14 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
         "000688.SS": "1.000688",
         "399001.SZ": "0.399001",
         "399006.SZ": "0.399006",
+        # A 股行业 ETF（用于板块轮动代理）
+        "512480.SS": "1.512480",
+        "515030.SS": "1.515030",
+        "512170.SS": "1.512170",
+        "515170.SS": "1.515170",
+        "512880.SS": "1.512880",
+        "512660.SS": "1.512660",
+        "512200.SS": "1.512200",
         # 港股主指数（对应东财港股行情）
         "HSI":    "100.HSI",
         "HSTECH": "100.HSTECH",
@@ -560,7 +602,16 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
         # 美股主要指数
         "SPX": "100.SPX",
         "NDX": "100.NDX",
+        "DJI": "100.DJIA",
+        "RUT": "100.RUT",
         "VIX": "100.VIX",
+        # 美股 SPDR 行业 ETF（东财美股行情，105 前缀）
+        "XLK": "105.XLK",
+        "XLF": "105.XLF",
+        "XLE": "105.XLE",
+        "XLV": "105.XLV",
+        "XLY": "105.XLY",
+        "XLI": "105.XLI",
         # 宏观 / 外汇 / 大宗
         "DXY": "100.UDI",
     }
@@ -587,12 +638,31 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
         "000688.SS": "sh000688",
         "399001.SZ": "sz399001",
         "399006.SZ": "sz399006",
+        # A-share sector ETFs
+        "512480.SS": "sh512480",
+        "515030.SS": "sh515030",
+        "512170.SS": "sh512170",
+        "515170.SS": "sh515170",
+        "512880.SS": "sh512880",
+        "512660.SS": "sh512660",
+        "512200.SS": "sh512200",
+        # HK
         "HSI":    "hkHSI",
         "HSTECH": "hkHSTECH",
         "HSCEI": "hkHSCEI",
+        # US indices
         "SPX": "usINX",
         "NDX": "usIXIC",
+        "DJI": "usDJI",
+        "RUT": "usRUT",
         "VIX": "usVIX",
+        # US SPDR sector ETFs
+        "XLK": "usXLK",
+        "XLF": "usXLF",
+        "XLE": "usXLE",
+        "XLV": "usXLV",
+        "XLY": "usXLY",
+        "XLI": "usXLI",
         "DXY": "usDXY",
     }
     _TX_TIMEOUT = float(os.getenv("TENCENT_TIMEOUT_SECONDS", "1.5"))
