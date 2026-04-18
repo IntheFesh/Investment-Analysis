@@ -29,13 +29,17 @@
   --brand: #3278ff;
   --brand-muted: #1b2b55;
 
-  --up: #21c88a;
-  --up-muted: #13433a;
-  --up-soft: rgba(33, 200, 138, 0.12);
+  /* A-share color convention: up is red, down is green. The Tailwind
+   * utility classes (``text-up`` / ``text-down`` / ``bg-up`` …) keep their
+   * semantic direction meaning; only the palette underneath is swapped so
+   * every chart, badge, and number on the page flips at once. */
+  --up: #ff4d6d;
+  --up-muted: #4a1a2a;
+  --up-soft: rgba(255, 77, 109, 0.12);
 
-  --down: #ff4d6d;
-  --down-muted: #4a1a2a;
-  --down-soft: rgba(255, 77, 109, 0.12);
+  --down: #21c88a;
+  --down-muted: #13433a;
+  --down-soft: rgba(33, 200, 138, 0.12);
 
   --neutral: #a6b3c8;
   --neutral-muted: #1e2a42;
@@ -83,13 +87,14 @@
   --brand: #1757f4;
   --brand-muted: #dce6ff;
 
-  --up: #0c9d6b;
-  --up-muted: #d0efe2;
-  --up-soft: rgba(12, 157, 107, 0.12);
+  /* A-share convention: up=red, down=green (see dark palette above). */
+  --up: #d63450;
+  --up-muted: #fadbe1;
+  --up-soft: rgba(214, 52, 80, 0.12);
 
-  --down: #d63450;
-  --down-muted: #fadbe1;
-  --down-soft: rgba(214, 52, 80, 0.12);
+  --down: #0c9d6b;
+  --down-muted: #d0efe2;
+  --down-soft: rgba(12, 157, 107, 0.12);
 
   --neutral: #475569;
   --neutral-muted: #e2e6ee;

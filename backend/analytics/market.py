@@ -226,30 +226,123 @@ def _rank_news(rows: List[Dict[str, Any]], top_k: int = 5) -> List[Dict[str, Any
     return uniq[:top_k]
 
 
+# ---------------------------------------------------------------------------
+# Domestic / international classification
+#
+# Upstream channel IDs (东财 102 vs 110, 新浪 2509 vs 2515) mix content — a
+# story about Iran-US conflict often lands in the A-share board because it
+# moves A-shares the next day. Relying only on the channel produced the
+# observed failure mode where 国内 showed oil/Iran stories and 国际 showed
+# Chinese-EV stories. So we pool candidates from every Chinese-language
+# endpoint we call and classify each by keyword, routing by whichever side
+# has stronger signal (ties go to 国内 since our primary audience is A-share).
+# ---------------------------------------------------------------------------
+
+
+_DOMESTIC_KEYWORDS: Tuple[str, ...] = (
+    # 市场与监管
+    "A股", "沪深", "上证", "深证", "创业板", "科创板", "科创", "北交所",
+    "证监会", "央行", "人行", "国常会", "政治局", "发改委", "银保监",
+    "财政部", "国务院", "国资委", "工信部", "商务部", "税务总局",
+    "沪深300", "中证500", "中证1000", "北证50", "中字头", "中特估",
+    "A50", "港股通", "沪股通", "深股通", "北向资金", "南向资金",
+    "人民币", "RMB", "LPR", "MLF", "逆回购", "降准",
+    # 中资公司（头部样本）
+    "宁德时代", "贵州茅台", "茅台", "五粮液", "比亚迪", "中芯国际",
+    "腾讯", "阿里", "阿里巴巴", "美团", "京东", "拼多多", "字节", "字节跳动",
+    "华为", "小米", "蔚来", "小鹏", "理想", "极氪", "零跑", "广汽", "长安",
+    "平安", "工商银行", "工行", "建设银行", "建行", "农业银行", "农行",
+    "中国银行", "招商银行", "招行", "交通银行", "交行", "中信",
+    "中国石油", "中石油", "中国石化", "中石化", "中国海油", "中海油",
+    "国家电网", "国电投", "大唐", "三峡", "中国移动", "中国电信", "中国联通",
+    "淘天", "淘宝", "天猫", "顺丰", "菜鸟", "京东物流",
+    "恒大", "碧桂园", "万科", "保利", "融创", "龙湖",
+    "中建", "中铁", "中信证券", "中金", "华泰", "海通", "国泰君安",
+)
+
+
+_INTERNATIONAL_KEYWORDS: Tuple[str, ...] = (
+    # 美国宏观 / 政府
+    "美联储", "联储", "鲍威尔", "FOMC", "美债", "美国国债",
+    "特朗普", "拜登", "哈里斯", "白宫", "国务卿", "国务院",
+    "美国", "美股", "标普", "标普500", "纳指", "纳斯达克", "道指", "道琼斯",
+    "罗素2000",
+    # 欧洲 / 日韩
+    "欧元", "欧央行", "欧洲央行", "拉加德", "欧盟", "欧洲",
+    "英镑", "英国", "英央行", "欧元区",
+    "日元", "日本", "日银", "日本央行", "植田",
+    "韩国", "韩元",
+    # 地缘
+    "俄罗斯", "普京", "乌克兰", "泽连斯基",
+    "以色列", "伊朗", "哈马斯", "美以", "美伊", "中东",
+    "霍尔木兹", "加沙", "红海", "胡塞",
+    # 大宗
+    "OPEC", "沙特", "布伦特", "WTI", "北海", "原油",
+    # 美企
+    "英伟达", "苹果", "特斯拉", "亚马逊", "谷歌", "Alphabet", "微软", "Meta",
+    "伯克希尔", "奈飞", "Netflix", "台积电",
+    # 多边
+    "G7", "G20", "IMF", "世行", "世贸", "WTO",
+)
+
+
+def _classify_news(title: str) -> str:
+    """Return ``domestic`` | ``international`` | ``unknown``.
+
+    Counts keyword hits on each side; ties break to ``domestic`` so A-share
+    readers don't lose China-relevant content when a headline mentions both
+    sides. Items with no hits on either side are dropped so the panels only
+    show clearly-on-topic stories.
+    """
+    if not title:
+        return "unknown"
+    dom_hits = sum(1 for kw in _DOMESTIC_KEYWORDS if kw in title)
+    intl_hits = sum(1 for kw in _INTERNATIONAL_KEYWORDS if kw in title)
+    if dom_hits == 0 and intl_hits == 0:
+        return "unknown"
+    if intl_hits > dom_hits:
+        return "international"
+    return "domestic"
+
+
 def _fetch_news_blocking(market_view: str) -> Dict[str, Any]:
-    # Both 国内 and 国际 pull from Chinese platforms.
-    #   - 国内: Eastmoney 102 (A-share) or 114 (HK) depending on the view,
-    #           with Sina 财经要闻 as the fallback.
-    #   - 国际: Eastmoney 110 (海外宏观) + Sina 国际财经 — both Chinese
-    #           reporting on overseas markets.
-    cn_channel = {"cn_a": "stock", "hk": "hk", "global": "stock"}.get(market_view, "stock")
-    # 国内 candidates — concat both primary + Sina fallback, then rank/dedupe.
-    dom_rows = _query_eastmoney_news(cn_channel, count=8)
-    if len(dom_rows) < 5:
-        dom_rows.extend(_query_sina_news(cn_channel, count=8))
-    # 国际 candidates — Eastmoney 110 first, then Sina international, both
-    # Chinese-language so the frontend never shows English titles again.
-    intl_rows = _query_eastmoney_news("global", count=8)
-    if len(intl_rows) < 5:
-        intl_rows.extend(_query_sina_news("global", count=8))
-    domestic = _rank_news(dom_rows, top_k=5)
-    international = _rank_news(intl_rows, top_k=5)
+    # Pool candidates from every Chinese-language feed we can reach, then
+    # classify by keyword so the 国内 / 国际 columns split on content rather
+    # than upstream board IDs (the root cause of the observed cross-mixing).
+    pool: List[Dict[str, Any]] = []
+    for ch in ("stock", "global"):
+        pool.extend(_query_eastmoney_news(ch, count=10))
+    for ch in ("stock", "global"):
+        pool.extend(_query_sina_news(ch, count=10))
+
+    # Dedupe by title across channels first so the classifier doesn't waste
+    # cycles on upstream repeats.
+    seen: set = set()
+    uniq: List[Dict[str, Any]] = []
+    for r in pool:
+        t = str(r.get("title") or "")
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        uniq.append(r)
+
+    dom_pool: List[Dict[str, Any]] = []
+    intl_pool: List[Dict[str, Any]] = []
+    for r in uniq:
+        kind = _classify_news(str(r.get("title") or ""))
+        if kind == "domestic":
+            dom_pool.append(r)
+        elif kind == "international":
+            intl_pool.append(r)
+
+    domestic = _rank_news(dom_pool, top_k=5)
+    international = _rank_news(intl_pool, top_k=5)
     news = {
         "domestic": domestic,
         "international": international,
         "sources_tried": {
-            "domestic": ["eastmoney:" + cn_channel, "sina:" + cn_channel],
-            "international": ["eastmoney:global", "sina:global"],
+            "pool": ["eastmoney:stock", "eastmoney:global", "sina:stock", "sina:global"],
+            "classification": "keyword_split",
         },
         "ranking": "importance_desc",
     }
@@ -791,33 +884,24 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
             continue
         sector_scored.append(_enhanced_sector_score(b, d, market_ret, window, total_turnover, global_lead))
 
-    # Cross-sector summaries attached to each index card. Same ranking for
-    # every index in the view (sector_scored is universe-level), but each
-    # index gets its own ``basis`` (annualized vol) and its own
-    # ``leaders`` slice (best/worst sector by window return).
-    sector_by_strength = sorted(
-        sector_scored,
-        key=lambda x: x["components"].get("relative_strength", 0.0),
-        reverse=True,
-    )
-    top_contribs = [
-        {"name": s["sector"], "value": round(float(s["components"].get("relative_strength", 0.0)), 4)}
-        for s in sector_by_strength[:3]
-    ]
-    sector_by_momentum = sorted(
-        sector_scored,
-        key=lambda x: x["components"].get("rolling_momentum", 0.0),
-        reverse=True,
-    )
-    top_leader = sector_by_momentum[:2]
-    bottom_leader = sector_by_momentum[-1:] if len(sector_by_momentum) >= 3 else []
-    leaders_rows = [
-        {
-            "name": s["sector"],
-            "change_percent": round(float(s["components"].get("rolling_momentum", 0.0)) * 100.0, 2),
-        }
-        for s in top_leader + bottom_leader
-    ]
+    # Pre-compute per-sector return series so each index card can weight
+    # sector contributions by its own correlation, rather than sharing a
+    # universe-level ranking across every index.
+    sector_series: List[Dict[str, Any]] = []
+    for s in sector_scored:
+        sec_df = data.get(s.get("proxy_symbol"))
+        if sec_df is None or sec_df.empty:
+            continue
+        sec_ret = sec_df["Adj Close"].astype(float).pct_change().dropna().tail(window)
+        if len(sec_ret) < 3:
+            continue
+        sector_series.append(
+            {
+                "sector": s["sector"],
+                "returns": sec_ret,
+                "cum_return": float((1 + sec_ret).prod() - 1),
+            }
+        )
 
     indices: List[Dict[str, Any]] = []
     for symbol in universe.headline_indices + universe.supporting_indices:
@@ -837,12 +921,61 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
 
         turnover_amt = float((close.iloc[-1] * vol.iloc[-1]))
 
-        # Per-index annualized vol over the display window; substitutes the
-        # futures "基差" field we can't source on the free tier. Expressed
-        # as a fraction (0.18 = 18%) so the frontend's formatPercent(v*100)
-        # renders it correctly.
-        win_ret = close.pct_change().dropna().tail(window)
-        annualized_vol = float(win_ret.std() * np.sqrt(252)) if len(win_ret) >= 3 else 0.0
+        idx_ret = close.pct_change().dropna().tail(window)
+        # Per-index contributions: for each sector basket, estimate how much
+        # of the index's move is co-directional with that sector by
+        # multiplying the correlation by the sector's cumulative return.
+        # Top-3 positive contributors, so two different indices produce two
+        # different lists (high-beta indices surface growth sectors, value
+        # indices surface financials/real estate).
+        # Correlation by tail-position (not index join) so sub-second
+        # timestamp jitter in generated data, or feed-level misalignment on
+        # real data, never collapses the overlap to zero.
+        per_sector: List[Tuple[str, float, float, float]] = []
+        idx_values = idx_ret.to_numpy(dtype=float)
+        for ss in sector_series:
+            sec_values = ss["returns"].to_numpy(dtype=float)
+            n = min(len(idx_values), len(sec_values))
+            if n < 3:
+                continue
+            a = idx_values[-n:]
+            b = sec_values[-n:]
+            if float(np.std(a)) < 1e-12 or float(np.std(b)) < 1e-12:
+                corr = 0.0
+            else:
+                corr = float(np.corrcoef(a, b)[0, 1])
+                if not np.isfinite(corr):
+                    corr = 0.0
+            contribution = corr * ss["cum_return"]
+            per_sector.append((ss["sector"], contribution, ss["cum_return"], corr))
+
+        contrib_sorted = sorted(per_sector, key=lambda t: t[1], reverse=True)
+        top_contribs = [
+            {"name": name_, "value": round(contribution, 4)}
+            for name_, contribution, _cum, _corr in contrib_sorted[:3]
+        ]
+
+        # Leaders: per-index filter to sectors whose co-movement with this
+        # index is material (|corr| >= 0.1), then rank by raw cum_return.
+        # Different indices keep different sector sets (growth indices
+        # surface growth sector leaders, value indices surface banks / real
+        # estate), so ``领涨跌`` no longer repeats the universe-wide list
+        # across every card. Falls back to the universe pool when the
+        # filter is too strict to produce three entries.
+        correlated = [t for t in per_sector if abs(t[3]) >= 0.1]
+        pool = correlated if len(correlated) >= 3 else per_sector
+        by_return = sorted(pool, key=lambda t: t[2], reverse=True)
+        top_leader = by_return[:2]
+        bottom_leader = by_return[-1:] if len(by_return) >= 3 else []
+        leaders_rows = [
+            {"name": name_, "change_percent": round(cum * 100.0, 2)}
+            for name_, _contribution, cum, _corr in top_leader + bottom_leader
+        ]
+
+        # Per-index annualized vol — substitutes the futures basis we can't
+        # source on the free tier. Stored as already-scaled percent to match
+        # the frontend's ``formatPercent`` contract.
+        annualized_vol_pct = float(idx_ret.std() * np.sqrt(252) * 100.0) if len(idx_ret) >= 3 else 0.0
 
         indices.append(
             {
@@ -861,7 +994,7 @@ def build_overview(adapter: DataSourceAdapter, time_window: str, market_view: st
                     "pb_percentile": round(_rolling_rank(close.pct_change().rolling(60).mean().dropna()) * 100, 1),
                 },
                 "contributors": top_contribs,
-                "basis": {"name": f"{window}日年化波幅", "value": round(annualized_vol, 4)},
+                "basis": {"name": f"{window}日年化波幅", "value": round(annualized_vol_pct, 2)},
                 "leaders": leaders_rows,
                 "as_of": df.index[-1].strftime("%Y-%m-%d %H:%M"),
                 "role": "headline" if symbol in universe.headline_indices else "support",

@@ -533,8 +533,10 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
             for fut in as_completed(futures):
                 logical, resolved = fut.result()
                 if resolved.empty:
-                    self._degraded = True
-                    self._degrade_reason = f"missing {logical} from yfinance"
+                    # Missing symbols just stay absent from the output. The
+                    # ``_degraded`` flag is intentionally not flipped here —
+                    # hybrid-research is the composite entry point and owns
+                    # the final truthful/degraded verdict.
                     continue
                 out[logical] = resolved
         return out
@@ -542,24 +544,13 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
     def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
         wanted = symbols or list(self._YF_SYMBOL_MAP.keys())
         mapped = [(logical, self._YF_SYMBOL_MAP.get(logical, "")) for logical in wanted]
-        out = self._download_yf([(l, y) for l, y in mapped if y])
-        # Fill any gap (incl. symbols not in _YF_SYMBOL_MAP) with the deterministic
-        # synthetic snapshot so downstream aggregations never see "暂无数据".
-        for symbol in wanted:
-            if symbol not in out:
-                params = self._PARAMS.get(symbol)
-                if params is None:
-                    continue
-                out[symbol] = self._generate(*params, seed=4242 + hash(symbol) % 9973)
-        return out
+        # Real-data-only path. Missing symbols stay absent from the result so
+        # the overview never renders synthesized numbers — callers must handle
+        # gaps as empty, not as fake data.
+        return self._download_yf([(l, y) for l, y in mapped if y])
 
     def meta(self, *, universe: str = "unknown", fallback_reason: Optional[str] = None) -> SourceMeta:
-        base = super().meta(universe=universe, fallback_reason=fallback_reason)
-        if self._degraded:
-            base.source_name = "yfinance-research-degraded"
-            base.fallback_reason = self._degrade_reason or "degraded"
-            base.is_proxy = True
-        return base
+        return super().meta(universe=universe, fallback_reason=fallback_reason)
 
 
 class HybridMarketResearchAdapter(YFinanceResearchAdapter):
@@ -970,23 +961,13 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
             if k not in out and not v.empty:
                 out[k] = v
 
-        # Final safety net: fabricate deterministic OHLCV for symbols that remain
-        # missing so the analytics pipeline can always complete. This is marked
-        # via the degraded meta; the envelope surfaces it as fallback.
-        missing: List[str] = []
-        for symbol in wanted:
-            if symbol in out and not out[symbol].empty:
-                continue
-            params = self._PARAMS.get(symbol)
-            if params is None:
-                missing.append(symbol)
-                continue
-            out[symbol] = self._generate(*params, seed=4242 + hash(symbol) % 9973)
-            missing.append(symbol)
-
-        if missing:
-            self._degraded = True
-            self._degrade_reason = f"fallback_used_for:{','.join(missing[:6])}"
+        # Real-data-only. Any symbol that all three vendors could not supply
+        # is dropped from ``out`` — callers treat absence as "no data" rather
+        # than substituting deterministic fake OHLCV. This preserves the
+        # honesty contract (no demo/fallback bytes in Round 0) at the cost of
+        # an occasional empty card when every vendor is unreachable.
+        self._degraded = False
+        self._degrade_reason = None
         return out
 
     # ------------------------------------------------------------------
