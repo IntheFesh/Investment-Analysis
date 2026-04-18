@@ -87,7 +87,9 @@ def test_ok_status_success_by_default_for_clean_meta() -> None:
 def test_ok_status_infers_degraded_when_fallback_used() -> None:
     resp = ok({"value": 1}, meta={"fallback_used": True, "fallback_reason": "snapshot_not_ready"})
     assert resp["status"] == STATUS_DEGRADED
-    assert resp["success"] is False
+    # HTTP 200 with usable data is still success=True — UI reads ``status``
+    # for the freshness badge; ``success`` only goes False on FAILED.
+    assert resp["success"] is True
 
 
 def test_ok_status_infers_partial_when_partial_flag_set() -> None:
