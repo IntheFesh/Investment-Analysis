@@ -2,13 +2,20 @@ import { ReactNode } from 'react';
 import Head from 'next/head';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
-import type { ApiMeta } from '@/lib/apiTypes';
+import { SourceFootnote } from '@/components/ui/SourceFootnote';
+import type { ApiMeta, EnvelopeStatus } from '@/lib/apiTypes';
 
 interface LayoutProps {
   children: ReactNode;
   title?: string;
   subtitle?: string;
   meta?: ApiMeta;
+  /** Envelope-level status when available — drives the freshness badge. */
+  status?: EnvelopeStatus;
+  /** When true, renders a default source footnote under the main content
+   *  using ``meta``. Round-0 pages set this so every data view shows the
+   *  "数据来源 · 延迟 · 截止 · 仅供研究" line without individual wiring. */
+  showSourceFootnote?: boolean;
   actions?: ReactNode;
   showPortfolio?: boolean;
   showMarket?: boolean;
@@ -20,6 +27,8 @@ export function Layout({
   title,
   subtitle,
   meta,
+  status,
+  showSourceFootnote,
   actions,
   showPortfolio,
   showMarket,
@@ -36,6 +45,7 @@ export function Layout({
         <div className="flex-1 flex flex-col min-w-0">
           <TopBar
             meta={meta}
+            status={status}
             rightSlot={rightSlot}
             showPortfolio={showPortfolio}
             showMarket={showMarket}
@@ -53,6 +63,11 @@ export function Layout({
               </div>
             )}
             <div className="space-y-4 animate-fade-in">{children}</div>
+            {showSourceFootnote ? (
+              <div className="mt-6 border-t border-border/60 pt-3">
+                <SourceFootnote meta={meta} />
+              </div>
+            ) : null}
           </main>
         </div>
       </div>

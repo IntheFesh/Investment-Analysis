@@ -4,10 +4,12 @@ import { PortfolioSelector } from './PortfolioSelector';
 import { ResearchModeSwitch } from './ResearchModeSwitch';
 import { ThemeToggle } from './ThemeToggle';
 import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
-import type { ApiMeta } from '@/lib/apiTypes';
+import { FreshnessBadge } from '@/components/ui/FreshnessBadge';
+import type { ApiMeta, EnvelopeStatus } from '@/lib/apiTypes';
 
 interface TopBarProps {
   meta?: ApiMeta;
+  status?: EnvelopeStatus;
   rightSlot?: ReactNode;
   showPortfolio?: boolean;
   showMarket?: boolean;
@@ -15,6 +17,7 @@ interface TopBarProps {
 
 export function TopBar({
   meta,
+  status,
   rightSlot,
   showPortfolio = true,
   showMarket = true,
@@ -37,6 +40,7 @@ export function TopBar({
       </div>
       <div className="flex items-center gap-3">
         {rightSlot}
+        <FreshnessBadge meta={meta} status={status} compact />
         <DataSourceBadge meta={meta} />
         <ResearchModeSwitch />
         <ThemeToggle />

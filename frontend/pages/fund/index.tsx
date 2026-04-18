@@ -16,6 +16,8 @@ export default function FundIndexPage() {
       title="单基金研究"
       subtitle="从基金池挑选目标产品，进入净值、风控、组合关系与研究结论。"
       meta={data?.meta}
+      status={data?.status}
+      showSourceFootnote
       showPortfolio={false}
     >
       <Card>

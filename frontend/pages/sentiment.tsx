@@ -23,6 +23,7 @@ export default function SentimentPage() {
   const [timeWindow, setTimeWindow] = useState<string>('20D');
   const { data, isLoading, error, refetch } = useSentimentOverview(timeWindow);
   const meta = data?.meta;
+  const status = data?.status;
   const sentiment = data?.data;
   const showAdvanced = researchMode !== 'light';
 
@@ -35,6 +36,8 @@ export default function SentimentPage() {
       title="风险情绪"
       subtitle="短/中期综合评分、四因子解释、历史轨迹与贡献度分解；评分进入仿真压力参数。"
       meta={meta}
+      status={status}
+      showSourceFootnote
       actions={
         <div className="flex items-center gap-2">
           <TimeWindowSelector

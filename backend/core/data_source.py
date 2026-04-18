@@ -408,7 +408,7 @@ class YFinanceResearchAdapter(DemoSnapshotAdapter):
         "CNH": "CNH=X",
     }
 
-    _YF_TIMEOUT = float(os.getenv("YF_TIMEOUT_SECONDS", "4.0"))
+    _YF_TIMEOUT = float(os.getenv("YF_TIMEOUT_SECONDS", "2.0"))
     _YF_CACHE_TTL = float(os.getenv("YF_CACHE_TTL", "300"))
     _yf_cache_lock = threading.Lock()
     _yf_cache: Dict[str, Tuple[float, pd.DataFrame]] = {}
@@ -565,7 +565,7 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
         "DXY": "100.UDI",
     }
 
-    _EM_TIMEOUT = float(os.getenv("EASTMONEY_TIMEOUT_SECONDS", "3.0"))
+    _EM_TIMEOUT = float(os.getenv("EASTMONEY_TIMEOUT_SECONDS", "1.5"))
     _EM_PRIORITY = {
         "000001.SS",
         "000300.SS",
@@ -595,7 +595,7 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
         "VIX": "usVIX",
         "DXY": "usDXY",
     }
-    _TX_TIMEOUT = float(os.getenv("TENCENT_TIMEOUT_SECONDS", "3.0"))
+    _TX_TIMEOUT = float(os.getenv("TENCENT_TIMEOUT_SECONDS", "1.5"))
 
     @staticmethod
     def _parse_em_date(raw: str) -> Optional[datetime]:
@@ -835,7 +835,27 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
         return df
 
     def index_price_data(self, symbols: Optional[List[str]] = None) -> Dict[str, pd.DataFrame]:
-        wanted = symbols or list(required_symbols_for("cn_a"))
+        # Hard rule: no hardcoded-view default. If the caller passes ``None``
+        # we serve the union of every known universe (cn_a ∪ hk ∪ global) so
+        # cross-market analytics keep working. If the caller passes an empty
+        # list explicitly, we fail fast — that almost always means a bug in
+        # the market-view → symbols resolution upstream.
+        if symbols is not None and len(list(symbols)) == 0:
+            raise ValueError(
+                "index_price_data: symbols is an empty list; resolve it via "
+                "required_symbols_for(market_view) before calling"
+            )
+        if symbols is None:
+            merged: List[str] = []
+            seen: set = set()
+            for view in UNIVERSES:
+                for s in required_symbols_for(view):
+                    if s not in seen:
+                        seen.add(s)
+                        merged.append(s)
+            wanted = merged
+        else:
+            wanted = list(symbols)
         out: Dict[str, pd.DataFrame] = {}
         remain: List[str] = []
         for symbol in wanted:
@@ -884,6 +904,127 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
             self._degraded = True
             self._degrade_reason = f"fallback_used_for:{','.join(missing[:6])}"
         return out
+
+    # ------------------------------------------------------------------
+    # Diagnostic probe — used by /api/v1/debug/data-probe
+    # ------------------------------------------------------------------
+
+    def probe_symbol(self, symbol: str) -> Dict[str, Any]:
+        """Run each vendor independently and record full diagnostics.
+
+        Returns a structured report: which vendors were tried, their HTTP
+        / parse outcomes, latency in ms, the raw first timestamp string
+        returned by each, and the parsed ``datetime``. This is the
+        authoritative source for debugging "真数据是否到达 + 时间戳是否解析正确"
+        on a deploy host.
+        """
+        report: Dict[str, Any] = {
+            "symbol": symbol,
+            "normalized_symbol": symbol,
+            "attempts": [],
+            "final_vendor": None,
+            "final_rows": 0,
+            "final_last_parsed": None,
+            "stale_reason": None,
+        }
+
+        # --- Eastmoney ---
+        if symbol in self._EM_SECID:
+            t0 = time.monotonic()
+            attempt: Dict[str, Any] = {
+                "vendor": "eastmoney",
+                "secid": self._EM_SECID[symbol],
+                "timeout_s": self._EM_TIMEOUT,
+            }
+            breaker = None
+            try:
+                from .runtime import breaker_registry
+                breaker = breaker_registry().state("eastmoney")
+                attempt["breaker_open"] = breaker.is_open(time.monotonic())
+            except Exception:  # noqa: BLE001
+                attempt["breaker_open"] = False
+            try:
+                df = self._eastmoney_kline(symbol)
+                attempt["rows"] = int(len(df))
+                attempt["ok"] = not df.empty
+                if not df.empty:
+                    attempt["first_raw_date"] = str(df.index.min())[:19]
+                    attempt["last_raw_date"] = str(df.index.max())[:19]
+                    attempt["last_close"] = float(df["Close"].iloc[-1])
+                    report["final_vendor"] = "eastmoney"
+                    report["final_rows"] = attempt["rows"]
+                    report["final_last_parsed"] = attempt["last_raw_date"]
+            except Exception as exc:  # noqa: BLE001
+                attempt["ok"] = False
+                attempt["error"] = f"{type(exc).__name__}: {exc}"[:200]
+            attempt["latency_ms"] = round((time.monotonic() - t0) * 1000.0, 2)
+            report["attempts"].append(attempt)
+
+        # --- Tencent ---
+        if report["final_vendor"] is None and symbol in self._TX_SECID:
+            t0 = time.monotonic()
+            attempt = {
+                "vendor": "tencent",
+                "secid": self._TX_SECID[symbol],
+                "timeout_s": self._TX_TIMEOUT,
+            }
+            try:
+                from .runtime import breaker_registry
+                attempt["breaker_open"] = breaker_registry().state("tencent").is_open(time.monotonic())
+            except Exception:  # noqa: BLE001
+                attempt["breaker_open"] = False
+            try:
+                df = self._tencent_kline(symbol)
+                attempt["rows"] = int(len(df))
+                attempt["ok"] = not df.empty
+                if not df.empty:
+                    attempt["first_raw_date"] = str(df.index.min())[:19]
+                    attempt["last_raw_date"] = str(df.index.max())[:19]
+                    attempt["last_close"] = float(df["Close"].iloc[-1])
+                    report["final_vendor"] = "tencent"
+                    report["final_rows"] = attempt["rows"]
+                    report["final_last_parsed"] = attempt["last_raw_date"]
+            except Exception as exc:  # noqa: BLE001
+                attempt["ok"] = False
+                attempt["error"] = f"{type(exc).__name__}: {exc}"[:200]
+            attempt["latency_ms"] = round((time.monotonic() - t0) * 1000.0, 2)
+            report["attempts"].append(attempt)
+
+        # --- Yahoo (residual) ---
+        if report["final_vendor"] is None:
+            yf_symbol = self._YF_SYMBOL_MAP.get(symbol, "")
+            if yf_symbol:
+                t0 = time.monotonic()
+                attempt = {
+                    "vendor": "yahoo",
+                    "secid": yf_symbol,
+                    "timeout_s": self._YF_TIMEOUT,
+                }
+                try:
+                    from .runtime import breaker_registry
+                    attempt["breaker_open"] = breaker_registry().state("yahoo").is_open(time.monotonic())
+                except Exception:  # noqa: BLE001
+                    attempt["breaker_open"] = False
+                try:
+                    df = self._yf_single(yf_symbol)
+                    attempt["rows"] = int(len(df))
+                    attempt["ok"] = not df.empty
+                    if not df.empty:
+                        attempt["first_raw_date"] = str(df.index.min())[:19]
+                        attempt["last_raw_date"] = str(df.index.max())[:19]
+                        attempt["last_close"] = float(df["Close"].iloc[-1])
+                        report["final_vendor"] = "yahoo"
+                        report["final_rows"] = attempt["rows"]
+                        report["final_last_parsed"] = attempt["last_raw_date"]
+                except Exception as exc:  # noqa: BLE001
+                    attempt["ok"] = False
+                    attempt["error"] = f"{type(exc).__name__}: {exc}"[:200]
+                attempt["latency_ms"] = round((time.monotonic() - t0) * 1000.0, 2)
+                report["attempts"].append(attempt)
+
+        if report["final_vendor"] is None:
+            report["stale_reason"] = "all_vendors_failed_or_unmapped"
+        return report
 
 
 # ---------------------------------------------------------------------------

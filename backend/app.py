@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,9 +20,16 @@ from fastapi.responses import JSONResponse
 from .core.data_source import get_data_source
 from .core.envelope import build_meta
 from .core.market_pipeline import get_market_pipeline
+from .core.runtime import (
+    current_trace_id,
+    new_trace_id,
+    reset_trace_id,
+    set_trace_id,
+)
 from .core.scheduler import register_default_jobs
 from .routers import (
     backtest,
+    debug as debug_router,
     export_api,
     fund,
     import_api,
@@ -51,7 +59,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def _trace_and_latency(request: Request, call_next):
+    """Attach trace_id + server-side latency to every envelope.
+
+    - Honours an inbound ``X-Trace-Id`` header so clients that already
+      generate one (e.g. the frontend fetch client) can correlate logs.
+    - Emits ``X-Trace-Id`` / ``X-Latency-Ms`` response headers and, when
+      the response body is a JSON envelope, injects ``meta.trace_id`` and
+      ``meta.latency_ms`` so the frontend doesn't need to peek at headers.
+    """
+    inbound = request.headers.get("x-trace-id", "").strip() or new_trace_id()
+    token = set_trace_id(inbound)
+    start = time.monotonic()
+    try:
+        response = await call_next(request)
+    finally:
+        elapsed_ms = round((time.monotonic() - start) * 1000.0, 2)
+        reset_trace_id(token)
+    response.headers["X-Trace-Id"] = inbound
+    response.headers["X-Latency-Ms"] = str(elapsed_ms)
+    return response
+
+
 app.include_router(system.router, prefix="/api/v1/system", tags=["system"])
+app.include_router(debug_router.router, prefix="/api/v1/debug", tags=["debug"])
 app.include_router(market.router, prefix="/api/v1/market", tags=["market"])
 app.include_router(sentiment.router, prefix="/api/v1/sentiment", tags=["sentiment"])
 app.include_router(portfolio.router, prefix="/api/v1/portfolio", tags=["portfolio"])
@@ -79,14 +111,19 @@ async def _on_shutdown() -> None:
 @app.exception_handler(Exception)
 async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:  # noqa: ARG001
     logging.getLogger(__name__).exception("unhandled error")
+    tid = current_trace_id()
+    meta = build_meta()
+    meta["trace_id"] = tid
     return JSONResponse(
         status_code=500,
+        headers={"X-Trace-Id": tid},
         content={
             "success": False,
-            "error_code": "UNEXPECTED_ERROR",
+            "status": "failed",
+            "error_code": "ERR_UNEXPECTED",
             "message": "后端内部错误，请检查日志",
             "data": None,
-            "meta": build_meta(),
+            "meta": meta,
         },
     )
 
