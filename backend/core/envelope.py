@@ -161,8 +161,13 @@ def ok(
         # ``ok`` is reserved for 200-style responses; callers that truly
         # want FAILED must go through ``failure()``.
         resolved = STATUS_DEGRADED
+    # ``success`` stays True for success/partial/degraded — all three are
+    # HTTP 200 with a usable payload. Only ``failure()`` flips it to False
+    # (and also changes http_status). The UI branches on ``status`` for the
+    # freshness badge; legacy callers that only read ``success`` keep
+    # working because a degraded cache hit is still "ok, here's data".
     return {
-        "success": resolved == STATUS_SUCCESS,
+        "success": resolved != STATUS_FAILED,
         "status": resolved,
         "message": message,
         "data": data,

@@ -629,6 +629,20 @@ class HybridMarketResearchAdapter(YFinanceResearchAdapter):
         return None
 
     def _eastmoney_kline(self, symbol: str) -> pd.DataFrame:
+        try:
+            return self._eastmoney_kline_impl(symbol)
+        except OverflowError as exc:
+            # Windows 32-bit ``time_t`` can raise ``OverflowError: timestamp
+            # out of range for platform time_t`` from deep inside
+            # pandas/numpy when a date sneaks past our strptime guard. Log
+            # once and fall through so Tencent/Yahoo can pick it up.
+            logger.info("eastmoney time_t overflow for %s: %s", symbol, exc)
+            return pd.DataFrame()
+        except Exception as exc:  # noqa: BLE001
+            logger.info("eastmoney unexpected error for %s: %s", symbol, exc)
+            return pd.DataFrame()
+
+    def _eastmoney_kline_impl(self, symbol: str) -> pd.DataFrame:
         secid = self._EM_SECID.get(symbol)
         if not secid:
             return pd.DataFrame()
